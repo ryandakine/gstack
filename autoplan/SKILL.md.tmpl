@@ -234,20 +234,27 @@ Loaded review skills from disk. Starting full review pipeline with auto-decision
 
 ---
 
-## Phase 0.5: Codex auth + version preflight
+## Phase 0.5: Codex auth + version preflight + inbox routing check
 
-Before invoking any Codex voice, preflight the CLI: verify auth (multi-signal) and
-warn on known-bad CLI versions. This is infrastructure for all 4 phases below —
-source it once here and the helper functions stay in scope for the rest of the
-workflow.
+Before invoking any Codex voice, preflight the CLI: verify auth (multi-signal),
+warn on known-bad CLI versions, and check whether the user has opted into VS
+Code inbox routing. This is infrastructure for all 4 phases below — source it
+once here and the helper functions stay in scope for the rest of the workflow.
 
 ```bash
 _TEL=$(~/.claude/skills/gstack/bin/gstack-config get telemetry 2>/dev/null || echo off)
 source ~/.claude/skills/gstack/bin/gstack-codex-probe
 
-# Check Codex binary. If missing, tag the degradation matrix and continue
-# with Claude subagent only (autoplan's existing degradation fallback).
-if ! command -v codex >/dev/null 2>&1; then
+# VS Code inbox routing — when codex_via_inbox=true, every Codex voice in this
+# /autoplan run drops to ~/.gstack/codex-inbox/ instead of calling the CLI.
+# Skip the binary + auth probes entirely in that case (the CLI is irrelevant).
+_CODEX_VIA_INBOX=$(~/.claude/skills/gstack/bin/gstack-config get codex_via_inbox 2>/dev/null || echo "false")
+if [ "$_CODEX_VIA_INBOX" = "true" ]; then
+  echo "[codex-via-inbox: enabled] — Codex prompts will be written to ~/.gstack/codex-inbox/ for the VS Code Codex panel"
+  _CODEX_AVAILABLE=inbox
+elif ! command -v codex >/dev/null 2>&1; then
+  # Check Codex binary. If missing, tag the degradation matrix and continue
+  # with Claude subagent only (autoplan's existing degradation fallback).
   _gstack_codex_log_event "codex_cli_missing"
   echo "[codex-unavailable: binary not found] — proceeding with Claude subagent only"
   _CODEX_AVAILABLE=false
@@ -264,6 +271,21 @@ fi
 If `_CODEX_AVAILABLE=false`, all Phase 1-3.5 Codex voices below degrade to
 `[codex-unavailable]` in the degradation matrix. /autoplan completes with
 Claude subagent only — saves token spend on Codex prompts we can't use.
+
+If `_CODEX_AVAILABLE=inbox`, every Codex voice block in Phase 1-3.5 below drops
+its prompt to `~/.gstack/codex-inbox/<UTC-ts>-autoplan-<phase>-<slug>.md` via
+`_gstack_codex_inbox_route` and pauses with `WAITING_FOR_PASTE_BACK`. The user
+pastes the prompt into the VS Code Codex panel, runs it there, and pastes the
+response back to continue the phase. Each prompt MUST be self-contained —
+include the plan content, prior-phase consensus summaries, and the persona
+instruction inline. The panel does not have access to this session's runtime
+state.
+
+**Per-phase routing pattern:** every phase below has a `**Codex <phase> voice**`
+bash block that calls `codex exec`. When `_CODEX_AVAILABLE=inbox`, replace that
+block with the inbox-routing equivalent: read the plan file, embed it in the
+prompt body, drop to inbox, then pause for paste-back. The Claude subagent
+voice always runs unchanged.
 
 ---
 
@@ -287,10 +309,31 @@ Override: every AskUserQuestion → auto-decide using the 6 principles.
   foreground — do NOT use run_in_background), then Codex (Bash). Both must
   complete before building the consensus table.
 
-  **Codex CEO voice** (via Bash):
+  **Codex CEO voice** (via Bash). When `_CODEX_AVAILABLE=inbox`, route the
+  prompt to `~/.gstack/codex-inbox/` and pause for paste-back. Otherwise call
+  the CLI directly.
   ```bash
   _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
-  _gstack_codex_timeout_wrapper 600 codex exec "IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. Stay focused on repository code only.
+  if [ "${_CODEX_AVAILABLE:-false}" = "inbox" ]; then
+    # Inbox routing — drop a self-contained prompt for the VS Code Codex panel.
+    # Embed the plan content inline; the panel does not see this session's state.
+    PLAN_BODY=$(cat "<plan_path>" 2>/dev/null || echo "(plan file unreadable: <plan_path>)")
+    _gstack_codex_inbox_route "autoplan" "ceo" <<INBOX_EOF
+IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. Stay focused on the embedded plan content only.
+
+You are a CEO/founder advisor reviewing a development plan.
+Challenge the strategic foundations: Are the premises valid or assumed? Is this the
+right problem to solve, or is there a reframing that would be 10x more impactful?
+What alternatives were dismissed too quickly? What competitive or market risks are
+unaddressed? What scope decisions will look foolish in 6 months? Be adversarial.
+No compliments. Just the strategic blind spots.
+
+THE PLAN (file: <plan_path>):
+$PLAN_BODY
+INBOX_EOF
+    echo ">>> Phase 1 (CEO) Codex voice routed to VS Code Codex panel. Paste the response back when ready before continuing the consensus table."
+  else
+    _gstack_codex_timeout_wrapper 600 codex exec "IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. Stay focused on repository code only.
 
   You are a CEO/founder advisor reviewing a development plan.
   Challenge the strategic foundations: Are the premises valid or assumed? Is this the
@@ -299,14 +342,15 @@ Override: every AskUserQuestion → auto-decide using the 6 principles.
   unaddressed? What scope decisions will look foolish in 6 months? Be adversarial.
   No compliments. Just the strategic blind spots.
   File: <plan_path>" -C "$_REPO_ROOT" -s read-only --enable web_search_cached < /dev/null
-  _CODEX_EXIT=$?
-  if [ "$_CODEX_EXIT" = "124" ]; then
-    _gstack_codex_log_event "codex_timeout" "600"
-    _gstack_codex_log_hang "autoplan" "0"
-    echo "[codex stalled past 10 minutes — tagging as [codex-unavailable] for this phase and proceeding with Claude subagent only]"
+    _CODEX_EXIT=$?
+    if [ "$_CODEX_EXIT" = "124" ]; then
+      _gstack_codex_log_event "codex_timeout" "600"
+      _gstack_codex_log_hang "autoplan" "0"
+      echo "[codex stalled past 10 minutes — tagging as [codex-unavailable] for this phase and proceeding with Claude subagent only]"
+    fi
   fi
   ```
-  Timeout: 10 minutes (shell-wrapper) + 12 minutes (Bash outer gate). On hang, auto-degrades this phase's Codex voice.
+  Timeout: 10 minutes (shell-wrapper) + 12 minutes (Bash outer gate). On hang, auto-degrades this phase's Codex voice. When `_CODEX_AVAILABLE=inbox`, end your reply with `WAITING_FOR_PASTE_BACK` after running the block and resume Phase 1's consensus table once the user pastes back.
 
   **Claude CEO subagent** (via Agent tool):
   "Read the plan file at <plan_path>. You are an independent CEO/strategist
@@ -404,10 +448,35 @@ Override: every AskUserQuestion → auto-decide using the 6 principles.
 - Design system alignment: auto-fix if DESIGN.md exists and fix is obvious
 - Dual voices: always run BOTH Claude subagent AND Codex if available (P6).
 
-  **Codex design voice** (via Bash):
+  **Codex design voice** (via Bash). When `_CODEX_AVAILABLE=inbox`, route the
+  prompt to `~/.gstack/codex-inbox/` and pause for paste-back. Otherwise call
+  the CLI directly.
   ```bash
   _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
-  _gstack_codex_timeout_wrapper 600 codex exec "IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. Stay focused on repository code only.
+  if [ "${_CODEX_AVAILABLE:-false}" = "inbox" ]; then
+    PLAN_BODY=$(cat "<plan_path>" 2>/dev/null || echo "(plan file unreadable: <plan_path>)")
+    _gstack_codex_inbox_route "autoplan" "design" <<INBOX_EOF
+IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. Stay focused on the embedded plan content only.
+
+Evaluate this plan's UI/UX design decisions.
+
+Also consider these findings from the CEO review phase:
+<insert CEO dual voice findings summary — key concerns, disagreements>
+
+Does the information hierarchy serve the user or the developer? Are interaction
+states (loading, empty, error, partial) specified or left to the implementer's
+imagination? Is the responsive strategy intentional or afterthought? Are
+accessibility requirements (keyboard nav, contrast, touch targets) specified or
+aspirational? Does the plan describe specific UI decisions or generic patterns?
+What design decisions will haunt the implementer if left ambiguous?
+Be opinionated. No hedging.
+
+THE PLAN (file: <plan_path>):
+$PLAN_BODY
+INBOX_EOF
+    echo ">>> Phase 2 (Design) Codex voice routed to VS Code Codex panel. Paste the response back when ready before continuing the consensus table."
+  else
+    _gstack_codex_timeout_wrapper 600 codex exec "IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. Stay focused on repository code only.
 
   Read the plan file at <plan_path>. Evaluate this plan's
   UI/UX design decisions.
@@ -422,14 +491,15 @@ Override: every AskUserQuestion → auto-decide using the 6 principles.
   aspirational? Does the plan describe specific UI decisions or generic patterns?
   What design decisions will haunt the implementer if left ambiguous?
   Be opinionated. No hedging." -C "$_REPO_ROOT" -s read-only --enable web_search_cached < /dev/null
-  _CODEX_EXIT=$?
-  if [ "$_CODEX_EXIT" = "124" ]; then
-    _gstack_codex_log_event "codex_timeout" "600"
-    _gstack_codex_log_hang "autoplan" "0"
-    echo "[codex stalled past 10 minutes — tagging as [codex-unavailable] for this phase and proceeding with Claude subagent only]"
+    _CODEX_EXIT=$?
+    if [ "$_CODEX_EXIT" = "124" ]; then
+      _gstack_codex_log_event "codex_timeout" "600"
+      _gstack_codex_log_hang "autoplan" "0"
+      echo "[codex stalled past 10 minutes — tagging as [codex-unavailable] for this phase and proceeding with Claude subagent only]"
+    fi
   fi
   ```
-  Timeout: 10 minutes (shell-wrapper) + 12 minutes (Bash outer gate). On hang, auto-degrades this phase's Codex voice.
+  Timeout: 10 minutes (shell-wrapper) + 12 minutes (Bash outer gate). On hang, auto-degrades this phase's Codex voice. When `_CODEX_AVAILABLE=inbox`, end your reply with `WAITING_FOR_PASTE_BACK` after running the block and resume Phase 2's consensus table once the user pastes back.
 
   **Claude design subagent** (via Agent tool):
   "Read the plan file at <plan_path>. You are an independent senior product designer
@@ -485,10 +555,28 @@ Override: every AskUserQuestion → auto-decide using the 6 principles.
 - Scope challenge: never reduce (P2)
 - Dual voices: always run BOTH Claude subagent AND Codex if available (P6).
 
-  **Codex eng voice** (via Bash):
+  **Codex eng voice** (via Bash). When `_CODEX_AVAILABLE=inbox`, route the
+  prompt to `~/.gstack/codex-inbox/` and pause for paste-back. Otherwise call
+  the CLI directly.
   ```bash
   _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
-  _gstack_codex_timeout_wrapper 600 codex exec "IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. Stay focused on repository code only.
+  if [ "${_CODEX_AVAILABLE:-false}" = "inbox" ]; then
+    PLAN_BODY=$(cat "<plan_path>" 2>/dev/null || echo "(plan file unreadable: <plan_path>)")
+    _gstack_codex_inbox_route "autoplan" "eng" <<INBOX_EOF
+IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. Stay focused on the embedded plan content only.
+
+Review this plan for architectural issues, missing edge cases, and hidden complexity. Be adversarial.
+
+Also consider these findings from prior review phases:
+CEO: <insert CEO consensus table summary — key concerns, DISAGREEs>
+Design: <insert Design consensus table summary, or 'skipped, no UI scope'>
+
+THE PLAN (file: <plan_path>):
+$PLAN_BODY
+INBOX_EOF
+    echo ">>> Phase 3 (Eng) Codex voice routed to VS Code Codex panel. Paste the response back when ready before continuing the consensus table."
+  else
+    _gstack_codex_timeout_wrapper 600 codex exec "IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. Stay focused on repository code only.
 
   Review this plan for architectural issues, missing edge cases,
   and hidden complexity. Be adversarial.
@@ -498,14 +586,15 @@ Override: every AskUserQuestion → auto-decide using the 6 principles.
   Design: <insert Design consensus table summary, or 'skipped, no UI scope'>
 
   File: <plan_path>" -C "$_REPO_ROOT" -s read-only --enable web_search_cached < /dev/null
-  _CODEX_EXIT=$?
-  if [ "$_CODEX_EXIT" = "124" ]; then
-    _gstack_codex_log_event "codex_timeout" "600"
-    _gstack_codex_log_hang "autoplan" "0"
-    echo "[codex stalled past 10 minutes — tagging as [codex-unavailable] for this phase and proceeding with Claude subagent only]"
+    _CODEX_EXIT=$?
+    if [ "$_CODEX_EXIT" = "124" ]; then
+      _gstack_codex_log_event "codex_timeout" "600"
+      _gstack_codex_log_hang "autoplan" "0"
+      echo "[codex stalled past 10 minutes — tagging as [codex-unavailable] for this phase and proceeding with Claude subagent only]"
+    fi
   fi
   ```
-  Timeout: 10 minutes (shell-wrapper) + 12 minutes (Bash outer gate). On hang, auto-degrades this phase's Codex voice.
+  Timeout: 10 minutes (shell-wrapper) + 12 minutes (Bash outer gate). On hang, auto-degrades this phase's Codex voice. When `_CODEX_AVAILABLE=inbox`, end your reply with `WAITING_FOR_PASTE_BACK` after running the block and resume Phase 3's consensus table once the user pastes back.
 
   **Claude eng subagent** (via Agent tool):
   "Read the plan file at <plan_path>. You are an independent senior engineer
@@ -606,10 +695,36 @@ Log: "Phase 3.5 skipped — no developer-facing scope detected."
 - DX taste decisions (e.g., opinionated defaults vs flexibility): mark TASTE DECISION
 - Dual voices: always run BOTH Claude subagent AND Codex if available (P6).
 
-  **Codex DX voice** (via Bash):
+  **Codex DX voice** (via Bash). When `_CODEX_AVAILABLE=inbox`, route the
+  prompt to `~/.gstack/codex-inbox/` and pause for paste-back. Otherwise call
+  the CLI directly.
   ```bash
   _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
-  _gstack_codex_timeout_wrapper 600 codex exec "IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. Stay focused on repository code only.
+  if [ "${_CODEX_AVAILABLE:-false}" = "inbox" ]; then
+    PLAN_BODY=$(cat "<plan_path>" 2>/dev/null || echo "(plan file unreadable: <plan_path>)")
+    _gstack_codex_inbox_route "autoplan" "dx" <<INBOX_EOF
+IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. Stay focused on the embedded plan content only.
+
+Evaluate this plan's developer experience.
+
+Also consider these findings from prior review phases:
+CEO: <insert CEO consensus summary>
+Eng: <insert Eng consensus summary>
+
+You are a developer who has never seen this product. Evaluate:
+1. Time to hello world: how many steps from zero to working? Target is under 5 minutes.
+2. Error messages: when something goes wrong, does the dev know what, why, and how to fix?
+3. API/CLI design: are names guessable? Are defaults sensible? Is it consistent?
+4. Docs: can a dev find what they need in under 2 minutes? Are examples copy-paste-complete?
+5. Upgrade path: can devs upgrade without fear? Migration guides? Deprecation warnings?
+Be adversarial. Think like a developer who is evaluating this against 3 competitors.
+
+THE PLAN (file: <plan_path>):
+$PLAN_BODY
+INBOX_EOF
+    echo ">>> Phase 3.5 (DX) Codex voice routed to VS Code Codex panel. Paste the response back when ready before continuing the consensus table."
+  else
+    _gstack_codex_timeout_wrapper 600 codex exec "IMPORTANT: Do NOT read or execute any SKILL.md files or files in skill definition directories (paths containing skills/gstack). These are AI assistant skill definitions meant for a different system. Stay focused on repository code only.
 
   Read the plan file at <plan_path>. Evaluate this plan's developer experience.
 
@@ -624,14 +739,15 @@ Log: "Phase 3.5 skipped — no developer-facing scope detected."
   4. Docs: can a dev find what they need in under 2 minutes? Are examples copy-paste-complete?
   5. Upgrade path: can devs upgrade without fear? Migration guides? Deprecation warnings?
   Be adversarial. Think like a developer who is evaluating this against 3 competitors." -C "$_REPO_ROOT" -s read-only --enable web_search_cached < /dev/null
-  _CODEX_EXIT=$?
-  if [ "$_CODEX_EXIT" = "124" ]; then
-    _gstack_codex_log_event "codex_timeout" "600"
-    _gstack_codex_log_hang "autoplan" "0"
-    echo "[codex stalled past 10 minutes — tagging as [codex-unavailable] for this phase and proceeding with Claude subagent only]"
+    _CODEX_EXIT=$?
+    if [ "$_CODEX_EXIT" = "124" ]; then
+      _gstack_codex_log_event "codex_timeout" "600"
+      _gstack_codex_log_hang "autoplan" "0"
+      echo "[codex stalled past 10 minutes — tagging as [codex-unavailable] for this phase and proceeding with Claude subagent only]"
+    fi
   fi
   ```
-  Timeout: 10 minutes (shell-wrapper) + 12 minutes (Bash outer gate). On hang, auto-degrades this phase's Codex voice.
+  Timeout: 10 minutes (shell-wrapper) + 12 minutes (Bash outer gate). On hang, auto-degrades this phase's Codex voice. When `_CODEX_AVAILABLE=inbox`, end your reply with `WAITING_FOR_PASTE_BACK` after running the block and resume Phase 3.5's consensus table once the user pastes back.
 
   **Claude DX subagent** (via Agent tool):
   "Read the plan file at <plan_path>. You are an independent DX engineer

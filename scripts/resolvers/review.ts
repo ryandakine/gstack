@@ -428,11 +428,21 @@ DIFF_TOTAL=$((DIFF_INS + DIFF_DEL))
 which codex 2>/dev/null && echo "CODEX_AVAILABLE" || echo "CODEX_NOT_AVAILABLE"
 # Legacy opt-out — only gates Codex passes, Claude always runs
 OLD_CFG=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || true)
+# VS Code inbox routing — when codex_via_inbox=true, drop Codex prompts to
+# ~/.gstack/codex-inbox/ for the VS Code Codex panel instead of calling the CLI.
+_CODEX_VIA_INBOX=$(~/.claude/skills/gstack/bin/gstack-config get codex_via_inbox 2>/dev/null || echo "false")
 echo "DIFF_SIZE: $DIFF_TOTAL"
 echo "OLD_CFG: \${OLD_CFG:-not_set}"
+echo "_CODEX_VIA_INBOX: $_CODEX_VIA_INBOX"
 \`\`\`
 
 If \`OLD_CFG\` is \`disabled\`: skip Codex passes only. Claude adversarial subagent still runs (it's free and fast). Jump to the "Claude adversarial subagent" section.
+
+If \`_CODEX_VIA_INBOX=true\`: every Codex pass below routes its prompt to
+\`~/.gstack/codex-inbox/\` instead of invoking the CLI. The Claude adversarial
+subagent always runs unchanged. The persisted review entry uses
+\`source: "inbox"\` so the dashboard knows the Codex contribution is pending
+paste-back.
 
 **User override:** If the user explicitly requested "full review", "structured review", or "P1 gate", also run the Codex structured review regardless of diff size.
 
@@ -458,7 +468,23 @@ If Codex is available AND \`OLD_CFG\` is NOT \`disabled\`:
 \`\`\`bash
 TMPERR_ADV=$(mktemp /tmp/codex-adv-XXXXXXXX)
 _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
-codex exec "${CODEX_BOUNDARY}Review the changes on this branch against the base branch. Run git diff origin/<base> to see the diff. Your job is to find ways this code will fail in production. Think like an attacker and a chaos engineer. Find edge cases, race conditions, security holes, resource leaks, failure modes, and silent data corruption paths. Be adversarial. Be thorough. No compliments — just the problems." -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR_ADV"
+if [ "\${_CODEX_VIA_INBOX:-false}" = "true" ]; then
+  # Inbox routing — embed the diff inline so the VS Code Codex panel sees it
+  # without filesystem access to this session.
+  source ~/.claude/skills/gstack/bin/gstack-codex-probe
+  DIFF_BODY=$(git diff origin/<base> 2>/dev/null | head -c 200000)
+  _gstack_codex_inbox_route "review" "adversarial" <<INBOX_EOF
+${CODEX_BOUNDARY}Review the changes on this branch against the base branch. Your job is to find ways this code will fail in production. Think like an attacker and a chaos engineer. Find edge cases, race conditions, security holes, resource leaks, failure modes, and silent data corruption paths. Be adversarial. Be thorough. No compliments — just the problems.
+
+THE DIFF (git diff origin/<base>):
+\\\`\\\`\\\`diff
+$DIFF_BODY
+\\\`\\\`\\\`
+INBOX_EOF
+  echo ">>> Codex adversarial routed to VS Code Codex panel. Paste the response back when ready before continuing the synthesis."
+else
+  codex exec "${CODEX_BOUNDARY}Review the changes on this branch against the base branch. Run git diff origin/<base> to see the diff. Your job is to find ways this code will fail in production. Think like an attacker and a chaos engineer. Find edge cases, race conditions, security holes, resource leaks, failure modes, and silent data corruption paths. Be adversarial. Be thorough. No compliments — just the problems." -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR_ADV"
+fi
 \`\`\`
 
 Set the Bash tool's \`timeout\` parameter to \`300000\` (5 minutes). Do NOT use the \`timeout\` shell command — it doesn't exist on macOS. After the command completes, read stderr:
@@ -487,7 +513,24 @@ If \`DIFF_TOTAL >= 200\` AND Codex is available AND \`OLD_CFG\` is NOT \`disable
 TMPERR=$(mktemp /tmp/codex-review-XXXXXXXX)
 _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
 cd "$_REPO_ROOT"
-codex review "${CODEX_BOUNDARY}Review the diff against the base branch." --base <base> -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR"
+if [ "\${_CODEX_VIA_INBOX:-false}" = "true" ]; then
+  # Inbox routing — embed the diff inline. The structured-review gate ([P1]
+  # markers) stays the same; the user pastes the Codex response back and
+  # Claude parses it for the gate verdict.
+  source ~/.claude/skills/gstack/bin/gstack-codex-probe
+  DIFF_BODY=$(git diff origin/<base> 2>/dev/null | head -c 200000)
+  _gstack_codex_inbox_route "review" "structured-review" <<INBOX_EOF
+${CODEX_BOUNDARY}Review the diff against the base branch. Use \`[P1]\` markers for critical findings and \`[P2]\` for non-critical. Be thorough; this gates shipping when [P1] markers are present.
+
+THE DIFF (git diff origin/<base>):
+\\\`\\\`\\\`diff
+$DIFF_BODY
+\\\`\\\`\\\`
+INBOX_EOF
+  echo ">>> Codex structured review routed to VS Code Codex panel. Paste the response back when ready, then evaluate the gate ([P1] = FAIL, none = PASS)."
+else
+  codex review "${CODEX_BOUNDARY}Review the diff against the base branch." --base <base> -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR"
+fi
 \`\`\`
 
 Set the Bash tool's \`timeout\` parameter to \`300000\` (5 minutes). Do NOT use the \`timeout\` shell command — it doesn't exist on macOS. Present output under \`CODEX SAYS (code review):\` header.
@@ -517,7 +560,7 @@ After all passes complete, persist:
 \`\`\`bash
 ~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"adversarial-review","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","status":"STATUS","source":"SOURCE","tier":"always","gate":"GATE","commit":"'"$(git rev-parse --short HEAD)"'"}'
 \`\`\`
-Substitute: STATUS = "clean" if no findings across ALL passes, "issues_found" if any pass found issues. SOURCE = "both" if Codex ran, "claude" if only Claude subagent ran. GATE = the Codex structured review gate result ("pass"/"fail"), "skipped" if diff < 200, or "informational" if Codex was unavailable. If all passes failed, do NOT persist.
+Substitute: STATUS = "clean" if no findings across ALL passes, "issues_found" if any pass found issues. SOURCE = "both" if Codex ran, "claude" if only Claude subagent ran, "inbox" if Codex was routed to the VS Code panel (paste-back may still be pending). GATE = the Codex structured review gate result ("pass"/"fail"), "skipped" if diff < 200, "informational" if Codex was unavailable, or "pending-paste-back" if routed via inbox. If all passes failed, do NOT persist.
 
 ---
 
@@ -551,10 +594,15 @@ After all review sections are complete, offer an independent second opinion from
 different AI system. Two models agreeing on a plan is stronger signal than one model's
 thorough review.
 
-**Check tool availability:**
+**Check tool availability and inbox routing:**
 
 \`\`\`bash
 which codex 2>/dev/null && echo "CODEX_AVAILABLE" || echo "CODEX_NOT_AVAILABLE"
+# VS Code inbox routing — when codex_via_inbox=true, drop the prompt to
+# ~/.gstack/codex-inbox/ instead of calling the CLI. The Claude subagent
+# fallback below still applies if the inbox route fails to write.
+_CODEX_VIA_INBOX=$(~/.claude/skills/gstack/bin/gstack-config get codex_via_inbox 2>/dev/null || echo "false")
+echo "_CODEX_VIA_INBOX: $_CODEX_VIA_INBOX"
 \`\`\`
 
 Use AskUserQuestion:
@@ -599,7 +647,18 @@ THE PLAN:
 \`\`\`bash
 TMPERR_PV=$(mktemp /tmp/codex-planreview-XXXXXXXX)
 _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
-codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR_PV"
+if [ "\${_CODEX_VIA_INBOX:-false}" = "true" ]; then
+  # Inbox routing — the prompt already embeds the plan content (see prompt
+  # construction above), so the VS Code Codex panel can review it without
+  # needing repo access.
+  source ~/.claude/skills/gstack/bin/gstack-codex-probe
+  _gstack_codex_inbox_route "plan-eng-review" "outside-voice" <<INBOX_EOF
+<prompt>
+INBOX_EOF
+  echo ">>> Plan outside-voice routed to VS Code Codex panel. Paste the response back when ready before continuing the cross-model tension synthesis."
+else
+  codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR_PV"
+fi
 \`\`\`
 
 Use a 5-minute timeout (\`timeout: 300000\`). After the command completes, read stderr:
@@ -674,8 +733,10 @@ If no tension points exist, note: "No cross-model tension — both reviewers agr
 ~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"codex-plan-review","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","status":"STATUS","source":"SOURCE","commit":"'"$(git rev-parse --short HEAD)"'"}'
 \`\`\`
 
-Substitute: STATUS = "clean" if no findings, "issues_found" if findings exist.
-SOURCE = "codex" if Codex ran, "claude" if subagent ran.
+Substitute: STATUS = "clean" if no findings, "issues_found" if findings exist,
+"pending-paste-back" if the prompt was routed via inbox and the user has not yet
+pasted the response back. SOURCE = "codex" if Codex CLI ran, "claude" if subagent
+ran, "inbox" if routed to the VS Code Codex panel.
 
 **Cleanup:** Run \`rm -f "$TMPERR_PV"\` after processing (if Codex was used).
 

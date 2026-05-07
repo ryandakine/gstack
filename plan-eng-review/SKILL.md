@@ -1233,10 +1233,15 @@ After all review sections are complete, offer an independent second opinion from
 different AI system. Two models agreeing on a plan is stronger signal than one model's
 thorough review.
 
-**Check tool availability:**
+**Check tool availability and inbox routing:**
 
 ```bash
 which codex 2>/dev/null && echo "CODEX_AVAILABLE" || echo "CODEX_NOT_AVAILABLE"
+# VS Code inbox routing — when codex_via_inbox=true, drop the prompt to
+# ~/.gstack/codex-inbox/ instead of calling the CLI. The Claude subagent
+# fallback below still applies if the inbox route fails to write.
+_CODEX_VIA_INBOX=$(~/.claude/skills/gstack/bin/gstack-config get codex_via_inbox 2>/dev/null || echo "false")
+echo "_CODEX_VIA_INBOX: $_CODEX_VIA_INBOX"
 ```
 
 Use AskUserQuestion:
@@ -1281,7 +1286,18 @@ THE PLAN:
 ```bash
 TMPERR_PV=$(mktemp /tmp/codex-planreview-XXXXXXXX)
 _REPO_ROOT=$(git rev-parse --show-toplevel) || { echo "ERROR: not in a git repo" >&2; exit 1; }
-codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR_PV"
+if [ "${_CODEX_VIA_INBOX:-false}" = "true" ]; then
+  # Inbox routing — the prompt already embeds the plan content (see prompt
+  # construction above), so the VS Code Codex panel can review it without
+  # needing repo access.
+  source ~/.claude/skills/gstack/bin/gstack-codex-probe
+  _gstack_codex_inbox_route "plan-eng-review" "outside-voice" <<INBOX_EOF
+<prompt>
+INBOX_EOF
+  echo ">>> Plan outside-voice routed to VS Code Codex panel. Paste the response back when ready before continuing the cross-model tension synthesis."
+else
+  codex exec "<prompt>" -C "$_REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' --enable web_search_cached < /dev/null 2>"$TMPERR_PV"
+fi
 ```
 
 Use a 5-minute timeout (`timeout: 300000`). After the command completes, read stderr:
@@ -1356,8 +1372,10 @@ If no tension points exist, note: "No cross-model tension — both reviewers agr
 ~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"codex-plan-review","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","status":"STATUS","source":"SOURCE","commit":"'"$(git rev-parse --short HEAD)"'"}'
 ```
 
-Substitute: STATUS = "clean" if no findings, "issues_found" if findings exist.
-SOURCE = "codex" if Codex ran, "claude" if subagent ran.
+Substitute: STATUS = "clean" if no findings, "issues_found" if findings exist,
+"pending-paste-back" if the prompt was routed via inbox and the user has not yet
+pasted the response back. SOURCE = "codex" if Codex CLI ran, "claude" if subagent
+ran, "inbox" if routed to the VS Code Codex panel.
 
 **Cleanup:** Run `rm -f "$TMPERR_PV"` after processing (if Codex was used).
 

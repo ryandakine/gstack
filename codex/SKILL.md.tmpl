@@ -90,6 +90,55 @@ deadlock fixed in #972.
 
 ---
 
+## Step 0.7: VS Code inbox routing (opt-in)
+
+When the user has set `gstack-config codex_via_inbox=true`, this skill (and any
+other gstack skill that would otherwise call `codex review` / `codex exec`) drops
+its prompt into `~/.gstack/codex-inbox/<UTC-ts>-codex-<mode>-<slug>.md` instead
+of invoking the CLI. The user pastes that file into the VS Code Codex panel
+(which uses their ChatGPT Plus quota, not the API-billed CLI) and pastes the
+response back into Claude.
+
+```bash
+_CODEX_VIA_INBOX=$(~/.claude/skills/gstack/bin/gstack-config get codex_via_inbox 2>/dev/null || echo "false")
+echo "_CODEX_VIA_INBOX=$_CODEX_VIA_INBOX"
+```
+
+If `_CODEX_VIA_INBOX=true`:
+- After Step 1 detects the mode (Review / Challenge / Consult), build the SAME
+  prompt you would have sent to the CLI — including the filesystem boundary,
+  any focus/persona prefix, the diff content (embed inline, do not reference
+  `git diff` — Codex panel is sandboxed differently), and the plan content if
+  this is a plan review.
+- Atomically write it to the inbox via `_gstack_codex_inbox_route`:
+  ```bash
+  source ~/.claude/skills/gstack/bin/gstack-codex-probe
+  _gstack_codex_inbox_route "codex" "<mode>" <<'CODEX_INBOX_PROMPT_EOF'
+  <full self-contained prompt — boundary + persona + embedded diff/plan/question>
+  CODEX_INBOX_PROMPT_EOF
+  ```
+  Substitute `<mode>` with `review`, `challenge`, or `consult`.
+- Tell the user verbatim:
+  > "Routed to VS Code Codex panel. The prompt is at the path printed above —
+  > paste it into the Codex side panel, then paste the response back here when
+  > ready. I'll wait."
+- End your reply with `WAITING_FOR_PASTE_BACK` and stop. Skip the CLI invocations
+  in Step 2A / 2B / 2C entirely. Skip the gate verdict, the cost line, and the
+  cross-model synthesis until the user pastes the response back.
+
+If `_CODEX_VIA_INBOX=false` (default), proceed to Step 1 + Step 2A/2B/2C below
+unchanged.
+
+**Note for other gstack skills:** `/autoplan`, `/plan-eng-review`, and `/review`
+also honor the `codex_via_inbox` flag and drop their Codex prompts to
+`~/.gstack/codex-inbox/` when it is set. Each writes a distinct filename
+(`<UTC-ts>-<skill>-<mode>-<slug>.md`) so concurrent skills don't clobber each
+other. Their prompts are self-contained — they include the synthesis context
+(prior phases' findings, plan content, diff) inline so the Codex panel does
+not need access to the running session.
+
+---
+
 ## Step 1: Detect mode
 
 Parse the user's input to determine which mode to run:

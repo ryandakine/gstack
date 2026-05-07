@@ -61,6 +61,10 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #
 # ─── Advanced ────────────────────────────────────────────────────────
 # codex_reviews: enabled    # disabled = skip Codex adversarial reviews in /ship
+# codex_via_inbox: false    # true = skills route Codex prompts to the VS Code
+#                           # Codex panel via ~/.gstack/codex-inbox/ instead of
+#                           # invoking the codex CLI directly. Useful when the
+#                           # CLI is API-billed but the panel uses a Plus quota.
 # gstack_contributor: false # true = file field reports when gstack misbehaves
 # skip_eng_review: false    # true = skip eng review gate in /ship (not recommended)
 #
@@ -80,6 +84,7 @@ lookup_default() {
     checkpoint_mode) echo "explicit" ;;
     checkpoint_push) echo "false" ;;
     codex_reviews) echo "enabled" ;;
+    codex_via_inbox) echo "false" ;;
     gstack_contributor) echo "false" ;;
     skip_eng_review) echo "false" ;;
     cross_project_learnings) echo "" ;; # intentionally empty → unset triggers first-time prompt
@@ -142,7 +147,7 @@ case "${1:-}" in
     echo "# ─── Active values (including defaults for unset keys) ───"
     for KEY in proactive routing_declined telemetry auto_upgrade update_check \
                skill_prefix checkpoint_mode checkpoint_push codex_reviews \
-               gstack_contributor skip_eng_review; do
+               codex_via_inbox gstack_contributor skip_eng_review; do
       VALUE=$(grep -E "^${KEY}:" "$CONFIG_FILE" 2>/dev/null | tail -1 | awk '{print $2}' | tr -d '[:space:]' || true)
       SOURCE="default"
       if [ -n "$VALUE" ]; then
@@ -157,7 +162,7 @@ case "${1:-}" in
     echo "# gstack-config defaults"
     for KEY in proactive routing_declined telemetry auto_upgrade update_check \
                skill_prefix checkpoint_mode checkpoint_push codex_reviews \
-               gstack_contributor skip_eng_review; do
+               codex_via_inbox gstack_contributor skip_eng_review; do
       printf '  %-24s %s\n' "$KEY:" "$(lookup_default "$KEY")"
     done
     ;;

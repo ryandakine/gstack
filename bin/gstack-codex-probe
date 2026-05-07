@@ -7,6 +7,8 @@
 #   _gstack_codex_version_check   — warn on known-bad Codex CLI versions
 #   _gstack_codex_timeout_wrapper — gtimeout -> timeout -> unwrapped fallback
 #   _gstack_codex_log_event       — telemetry emission to ~/.gstack/analytics/
+#   _gstack_codex_inbox_enabled   — check if codex_via_inbox config flag is true
+#   _gstack_codex_inbox_route     — write prompt to ~/.gstack/codex-inbox/ atomically
 #
 # Hygiene rules (enforced by test/codex-hardening.test.ts):
 #   - Never set -e / set -u / trap / IFS= / PATH= in this file.
@@ -84,6 +86,65 @@ _gstack_codex_log_event() {
   printf '{"skill":"codex","event":"%s","duration_s":"%s","ts":"%s"}\n' \
     "$_event" "$_duration" "$_ts" \
     >> "$HOME/.gstack/analytics/skill-usage.jsonl" 2>/dev/null || true
+}
+
+# --- VS Code inbox routing (opt-in) -----------------------------------------
+
+_gstack_codex_inbox_enabled() {
+  # Returns 0 (true) if user has set `codex_via_inbox: true` in
+  # ~/.gstack/config.yaml, else 1. Reads via gstack-config so the canonical
+  # default (false) and lookup logic stay in one place.
+  local _cfg_bin="$HOME/.claude/skills/gstack/bin/gstack-config"
+  [ -x "$_cfg_bin" ] || return 1
+  local _val
+  _val=$("$_cfg_bin" get codex_via_inbox 2>/dev/null || echo "")
+  [ "$_val" = "true" ] && return 0
+  return 1
+}
+
+_gstack_codex_inbox_route() {
+  # Atomically write a self-contained Codex prompt to ~/.gstack/codex-inbox/
+  # so the user can paste it into the VS Code Codex panel and feed the
+  # response back. Skill bash blocks call this instead of `codex exec` /
+  # `codex review` when `codex_via_inbox: true`.
+  #
+  # Args:
+  #   $1 — skill name (e.g. "autoplan", "review", "plan-eng-review", "codex")
+  #   $2 — mode label (e.g. "ceo", "eng", "design", "dx", "adversarial",
+  #        "structured-review", "outside-voice", "consult", "challenge")
+  #
+  # Stdin: full prompt body (markdown). Caller must build a self-contained
+  # prompt — Codex sees only what's in the file, NOT the skill's runtime state.
+  #
+  # Stdout (on success):
+  #   INBOX_PATH=<path>
+  #   WAITING_FOR_PASTE_BACK
+  #
+  # Returns 0 on success; non-zero if the inbox dir cannot be created.
+  local _skill="${1:-codex}"
+  local _mode="${2:-default}"
+  local _inbox_dir="$HOME/.gstack/codex-inbox"
+  mkdir -p "$_inbox_dir" 2>/dev/null || return 1
+
+  # UTC timestamp + repo slug make the filename greppable + sortable.
+  local _ts
+  _ts=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || echo unknown)
+  local _slug
+  _slug=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" 2>/dev/null \
+            | tr -cd 'a-zA-Z0-9._-' | head -c 40)
+  [ -z "$_slug" ] && _slug="repo"
+
+  local _final="$_inbox_dir/${_ts}-${_skill}-${_mode}-${_slug}.md"
+  local _tmp="${_final}.partial"
+
+  # Write to .partial first, then atomic rename. A reader watching the inbox
+  # never sees a half-written file.
+  cat > "$_tmp" || { rm -f "$_tmp" 2>/dev/null; return 1; }
+  mv "$_tmp" "$_final" || { rm -f "$_tmp" "$_final" 2>/dev/null; return 1; }
+
+  echo "INBOX_PATH=$_final"
+  echo "WAITING_FOR_PASTE_BACK"
+  return 0
 }
 
 # --- Learnings log on hang --------------------------------------------------
