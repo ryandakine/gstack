@@ -1186,6 +1186,23 @@ confirms it IS a real issue, that is a calibration event. Your initial confidenc
 too low. Log the corrected pattern as a learning so future reviews catch it with
 higher confidence.
 
+## Invariant-First Finding Format
+
+Pattern-matching a finding to a known-bad signature catches the bugs you have seen before. Naming the broken invariant catches the ones you have not. For every finding, also state the invariant it breaks and the trust boundary it breaks at, not just the CWE it resembles:
+
+**Format:** [SEVERITY] (confidence: N/10) file:line — invariant "<name>" no longer holds at <boundary>: <what the code does instead>
+
+The recurring boundary invariants:
+- **Authorization re-checked server-side, every request** (broken by IDOR, forced browsing, mass assignment).
+- **Code and data travel in separate channels** (broken by SQL/command/template injection, and by prompt injection: model input is data, never instructions).
+- **Identity is cryptographically bound and verified** (broken by JWT alg=none, key confusion, SAML XSW).
+- **Durable-memory reads are validated like untrusted input** (broken by memory poisoning, trusted-cache or trusted-config reads).
+- **Least privilege at the tool or capability boundary** (broken by excessive agency, SSRF, and the lethal trifecta: private data + untrusted input + an egress channel in one component).
+
+Why it matters: a deny-list of patterns is incomplete over an unbounded attack surface, so signature review misses the unseen variant. An invariant is a positive property the code must hold, so a never-before-seen bug still maps to "invariant X is no longer guaranteed." Use the pattern to find the candidate; use the invariant to judge whether it is real and to generalize the fix.
+
+Caveat at the model boundary: an LLM cannot reliably separate instructions from data, so the instruction-and-data-separation invariant often cannot be restored by validation. When it cannot, the fix is blast-radius reduction (least privilege, human approval for consequential actions, deny one leg of the trifecta), not "sanitize the input harder."
+
 ---
 
 ## Step 4.5: Review Army — Specialist Dispatch
