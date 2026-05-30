@@ -49,22 +49,22 @@ When the user types `/cso`, run this skill.
 ## Arguments
 - `/cso` — full daily audit (all phases, 8/10 confidence gate)
 - `/cso --comprehensive` — monthly deep scan (all phases, 2/10 bar — surfaces more)
-- `/cso --infra` — infrastructure-only (Phases 0-6, 12-14)
-- `/cso --code` — code-only (Phases 0-1, 7, 9-11, 12-14)
-- `/cso --skills` — skill supply chain only (Phases 0, 8, 12-14)
+- `/cso --infra` — infrastructure-only (Phases 0-6, 13-15)
+- `/cso --code` — code-only (Phases 0-1, 7, 9-12, 13-15)
+- `/cso --skills` — skill supply chain only (Phases 0, 8, 13-15)
 - `/cso --diff` — branch changes only (combinable with any above)
-- `/cso --supply-chain` — dependency audit only (Phases 0, 3, 12-14)
-- `/cso --owasp` — OWASP Top 10 only (Phases 0, 9, 12-14)
+- `/cso --supply-chain` — dependency audit only (Phases 0, 3, 13-15)
+- `/cso --owasp` — OWASP Top 10 only (Phases 0, 9, 13-15)
 - `/cso --scope auth` — focused audit on a specific domain
 
 ## Mode Resolution
 
-1. If no flags → run ALL phases 0-14, daily mode (8/10 confidence gate).
-2. If `--comprehensive` → run ALL phases 0-14, comprehensive mode (2/10 confidence gate). Combinable with scope flags.
+1. If no flags → run ALL phases 0-15, daily mode (8/10 confidence gate).
+2. If `--comprehensive` → run ALL phases 0-15, comprehensive mode (2/10 confidence gate). Combinable with scope flags.
 3. Scope flags (`--infra`, `--code`, `--skills`, `--supply-chain`, `--owasp`, `--scope`) are **mutually exclusive**. If multiple scope flags are passed, **error immediately**: "Error: --infra and --code are mutually exclusive. Pick one scope flag, or run `/cso` with no flags for a full audit." Do NOT silently pick one — security tooling must never ignore user intent.
 4. `--diff` is combinable with ANY scope flag AND with `--comprehensive`.
 5. When `--diff` is active, each phase constrains scanning to files/configs changed on the current branch vs the base branch. For git history scanning (Phase 2), `--diff` limits to commits on the current branch only.
-6. Phases 0, 1, 12, 13, 14 ALWAYS run regardless of scope flag.
+6. Phases 0, 1, 13, 14, 15 ALWAYS run regardless of scope flag. Phase 12 (Billing & Account Lifecycle Integrity) runs in full and `--code` modes, and is skipped automatically when the project has no billing/accounts.
 7. If WebSearch is unavailable, skip checks that require it and note: "WebSearch unavailable — proceeding with local-only analysis."
 
 ## Important: Use the Grep tool for all code searches
@@ -397,7 +397,35 @@ PUBLIC:
   - Marketing content, documentation, public APIs
 ```
 
-### Phase 12: False Positive Filtering + Active Verification
+### Phase 12: Billing & Account Lifecycle Integrity
+
+Run this for any app with subscriptions, billing, or user accounts. Detect it from Phase 0/1: a billing integration (Stripe, Paddle, Chargebee, LemonSqueezy, RevenueCat), a webhook handler, a `subscription_tier`/`plan`/`status` column, or a checkout route. If none of that exists, write one line — "no billing or account lifecycle — skipped" — and move on.
+
+This is money correctness, not exploit hunting, so the 8/10 security confidence gate does NOT apply here — these are deterministic code-trace findings, not probabilistic exploits. A broken lifecycle does not let an attacker in. It does something arguably worse for a small team: it charges a customer and gives them nothing, keeps billing someone who already left, or strands a returning customer. These almost never show up in tests, because the one path everyone tests ("new user subscribes") works. They surface as refunds, chargebacks, and support tickets. Report them in a **separate "Billing & Account Lifecycle Integrity" section** of the report, NOT the security findings table, and rate severity by business impact: billed-with-no-access or billed-after-leaving is HIGH/CRITICAL; cosmetic status drift is LOW.
+
+Trace the real code (the webhook handler, checkout/portal routes, the users/subscription table and its CHECK constraints, and every place tier/status is read to gate a paid feature). Code-tracing only, no live calls. Answer each with file:line evidence, or "absent — no such code":
+
+1. **Webhook event coverage.** List every billing event the handler actually branches on, then compare against the events that drive the whole lifecycle: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`, `invoice.payment_succeeded`, and refund/dispute events (`charge.refunded`, `charge.dispute.created`). For EACH lifecycle event not handled, state the concrete drift it causes. The classic miss is `customer.subscription.updated` — its absence silently breaks plan changes AND payment recovery at the same time.
+
+2. **Plan change (upgrade/downgrade).** If a user switches plans in the provider's customer portal, does the stored tier update? If tier is derived once at checkout and never re-synced from the live subscription's price, the user pays one tier while the app serves another, including the perverse upgrade case where they pay MORE and get a 403 because the entitlement check still reads the old tier.
+
+3. **Payment failure then recovery.** A failed card moves status to `past_due`/`unpaid`. When the customer fixes the card and the provider recovers the charge, does status return to `active`? If only the failure event is handled and not the recovery (`invoice.payment_succeeded`, or `subscription.updated` back to active), the customer is billed in full but locked out forever with no self-serve fix.
+
+4. **Cancellation semantics.** Cancel-at-period-end vs immediate. Does the user keep access until the period ends and then get downgraded? Confirm the downgrade is INTENTIONAL (the handler reacts to the cancel / `deleted` event) and not accidental (it "works" only because the cancel event is dropped, so a future handler change would silently break the keep-access guarantee). Is the end date persisted and surfaced so the UI can say "cancels on X"?
+
+5. **Enum / CHECK-constraint consistency.** Cross-check every tier/status string the code WRITES against the DB CHECK constraint, enum, or migration. A value the webhook writes but the schema rejects makes the entitlement UPDATE fail — the customer is charged by the provider but the row is never provisioned. A newly added tier wired in code but never migrated into the constraint is the canonical version of this.
+
+6. **Entitlement consistency across features.** Is every paid feature gated on the SAME rule (tier AND status), or does one path check `status == 'active'` while another keys only on tier? Mismatched gates mean a `past_due` user is locked out of one feature but keeps full paid use of another. Pick one policy and enforce it everywhere.
+
+7. **Account deletion and billing.** Is there a delete-account / close-account path at all? If yes, trace whether it CANCELS the active subscription FIRST (look up the billing customer, cancel its subscriptions) before deleting the user. If it deletes the user but leaves the subscription active, the ex-customer keeps getting billed with no way to log in to stop it — CRITICAL, this is the chargeback path. If there is NO delete path, flag both the right-to-erasure gap AND that the de-facto manual delete (an operator removing the auth user) does nothing to the billing provider, so the card keeps getting charged.
+
+8. **Return / re-subscribe.** When a cancelled or deleted user comes back: does checkout reconnect to their EXISTING billing customer (lookup by email or a stable id), or mint a new one, orphaning the old subscription and risking double billing? Can they re-register the same email after deletion, or is the email orphaned/blocked by a stale row? Is their prior data recoverable or already cascade-deleted?
+
+9. **Deletion cascade integrity.** Are child rows (usage logs, uploads, domain data) wired with consistent `ON DELETE` behavior so a delete tears the graph down cleanly, instead of orphaning rows or blocking the delete on a foreign key?
+
+For each gap: the concrete user-facing consequence step by step, the file:line, and the fix. Collect them under a "Billing & Account Lifecycle Integrity" heading in the report (Phase 15) and in the `lifecycle_integrity` array of the saved JSON.
+
+### Phase 13: False Positive Filtering + Active Verification
 
 Before producing findings, run every candidate through this filter.
 
@@ -486,7 +514,7 @@ Launch all verifiers in parallel. Discard findings where the verifier scores bel
 
 If the Agent tool is unavailable, self-verify by re-reading code with a skeptic's eye. Note: "Self-verified — independent sub-task unavailable."
 
-### Phase 13: Findings Report + Trend Tracking + Remediation
+### Phase 14: Findings Report + Trend Tracking + Remediation
 
 **Exploit scenario requirement:** Every finding MUST include a concrete exploit scenario — a step-by-step attack path an attacker would follow. "This pattern is insecure" is not a finding.
 
@@ -552,7 +580,7 @@ Match findings across reports using the `fingerprint` field (sha256 of category 
    - C) Accept risk — [document why, set review date]
    - D) Defer to TODOS.md with security label
 
-### Phase 14: Save Report
+### Phase 15: Save Report
 
 ```bash
 mkdir -p .gstack/security-reports
@@ -567,7 +595,7 @@ Write findings to `.gstack/security-reports/{date}-{HHMMSS}.json` using this sch
   "mode": "daily | comprehensive",
   "scope": "full | infra | code | skills | supply-chain | owasp",
   "diff_mode": false,
-  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
   "attack_surface": {
     "code": { "public_endpoints": 0, "authenticated": 0, "admin": 0, "api": 0, "uploads": 0, "integrations": 0, "background_jobs": 0, "websockets": 0 },
     "infrastructure": { "ci_workflows": 0, "webhook_receivers": 0, "container_configs": 0, "iac_configs": 0, "deploy_targets": 0, "secret_management": "unknown" }
@@ -591,6 +619,14 @@ Write findings to `.gstack/security-reports/{date}-{HHMMSS}.json` using this sch
     "recommendation": "...",
     "playbook": "...",
     "verification": "independently verified | self-verified"
+  }],
+  "lifecycle_integrity": [{
+    "area": "subscription | account",
+    "severity_business": "CRITICAL | HIGH | MEDIUM | LOW",
+    "title": "...",
+    "what_happens": "concrete user-facing consequence, step by step",
+    "file": "file:line or 'absent — no such code'",
+    "fix": "..."
   }],
   "supply_chain_summary": {
     "direct_deps": 0, "transitive_deps": 0,
