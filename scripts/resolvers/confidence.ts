@@ -59,7 +59,16 @@ The recurring boundary invariants:
 
 Why it matters: a deny-list of patterns is incomplete over an unbounded attack surface, so signature review misses the unseen variant. An invariant is a positive property the code must hold, so a never-before-seen bug still maps to "invariant X is no longer guaranteed." Use the pattern to find the candidate; use the invariant to judge whether it is real and to generalize the fix.
 
-Caveat at the model boundary: an LLM cannot reliably separate instructions from data, so the instruction-and-data-separation invariant often cannot be restored by validation. When it cannot, the fix is blast-radius reduction (least privilege, human approval for consequential actions, deny one leg of the trifecta), not "sanitize the input harder."`
+Caveat at the model boundary: an LLM cannot reliably separate instructions from data, so the instruction-and-data-separation invariant often cannot be restored by validation. When it cannot, the fix is blast-radius reduction (least privilege, human approval for consequential actions, deny one leg of the trifecta), not "sanitize the input harder."
+
+## Agent & Trust-Boundary Review Checks
+
+For code that builds AI agents or tools, or anything that reads external or persisted input, run these four checks alongside the invariants above. They catch architectural failures a per-line scan misses. (Ported from the offensive-security / ai-red-teaming canon via the second-brain cross-pollination layer.)
+
+- **Lethal-trifecta audit.** Model each agent or component as three legs: access to private/sensitive data ∧ ingestion of untrusted/external content ∧ an outbound egress channel. All three co-located in one trust context is a *lethal trifecta* — report it as an architectural finding, not a lint. The fix is to cut one leg structurally (quarantine untrusted-content readers from private-data tools, or strip egress from any component that touches untrusted input), never a ~95%-accurate classifier.
+- **Memory as a trust store (validate on read).** Treat durable or persisted state — caches, agent-written records, auto-captured memory, config read at runtime — as untrusted input at READ time. Provenance-tag on write; re-validate on read before it drives a decision. Flag any path that reads persisted or agent-written state and acts on it without re-checking.
+- **Least-privilege / blast-radius bounding.** Check that standing capability is bounded up front: minimum tool set, least-scope credentials, read tools split from write tools, irreversible actions human-gated. Flag excessive standing capability regardless of how safe the current prompt looks — bounding it caps the damage whether the agent is merely confident or actually compromised.
+- **Differential (two-session) reasoning.** Some defects are a missing behavior *delta* invisible to single-observation review: prompt-injection compliance, scope creep, missing authz between roles. Where it applies, reason about paired inputs that differ in exactly one privileged dimension (authed vs unauthed, benign vs injected) and assert the output diverges correctly — not just that a single input looks fine.`
       : '';
 
   return base + invariantFirst;
