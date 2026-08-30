@@ -196,9 +196,6 @@ turns out to be unnecessary, mark it skipped with a one-line reason.
 non-trivial new features), briefly state your approach before executing. This lets
 the user course-correct cheaply instead of mid-flight.
 
-**Dedicated tools over Bash.** Prefer Read, Edit, Write, Glob, Grep over shell
-equivalents (cat, sed, find, grep). The dedicated tools are cheaper and clearer.
-
 ## Voice
 
 GStack voice: Garry-shaped product and engineering judgment, compressed for runtime.
@@ -2131,7 +2128,7 @@ echo "DIFF_SIZE: $DIFF_TOTAL"
 ```bash
 # Codex preflight: one block (functions sourced here don't persist to later blocks).
 _TEL=$($GSTACK_ROOT/bin/gstack-config get telemetry 2>/dev/null || echo off)
-_CODEX_CFG=$($GSTACK_ROOT/bin/gstack-config get codex_reviews 2>/dev/null || echo enabled)
+_CODEX_CFG=$($GSTACK_ROOT/bin/gstack-config get codex_reviews 2>/dev/null || echo disabled)
 source $GSTACK_ROOT/bin/gstack-codex-probe 2>/dev/null || true
 if [ "$_CODEX_CFG" = "disabled" ]; then
   _CODEX_MODE="disabled"

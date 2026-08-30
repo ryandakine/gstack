@@ -210,9 +210,6 @@ turns out to be unnecessary, mark it skipped with a one-line reason.
 non-trivial new features), briefly state your approach before executing. This lets
 the user course-correct cheaply instead of mid-flight.
 
-**Dedicated tools over Bash.** Prefer Read, Edit, Write, Glob, Grep over shell
-equivalents (cat, sed, find, grep). The dedicated tools are cheaper and clearer.
-
 ## Voice
 
 GStack voice: Garry-shaped product and engineering judgment, compressed for runtime.
@@ -417,22 +414,22 @@ When the user types `/cso`, run this skill.
 ## Arguments
 - `/cso` — full daily audit (all phases, 8/10 confidence gate)
 - `/cso --comprehensive` — monthly deep scan (all phases, 2/10 bar — surfaces more)
-- `/cso --infra` — infrastructure-only (Phases 0-6, 12-14)
-- `/cso --code` — code-only (Phases 0-1, 7, 9-11, 12-14)
-- `/cso --skills` — skill supply chain only (Phases 0, 8, 12-14)
+- `/cso --infra` — infrastructure-only (Phases 0-6, 13-15)
+- `/cso --code` — code-only (Phases 0-1, 7, 9-12, 13-15)
+- `/cso --skills` — skill supply chain only (Phases 0, 8, 13-15)
 - `/cso --diff` — branch changes only (combinable with any above)
-- `/cso --supply-chain` — dependency audit only (Phases 0, 3, 12-14)
-- `/cso --owasp` — OWASP Top 10 only (Phases 0, 9, 12-14)
+- `/cso --supply-chain` — dependency audit only (Phases 0, 3, 13-15)
+- `/cso --owasp` — OWASP Top 10 only (Phases 0, 9, 13-15)
 - `/cso --scope auth` — focused audit on a specific domain
 
 ## Mode Resolution
 
-1. If no flags → run ALL phases 0-14, daily mode (8/10 confidence gate).
-2. If `--comprehensive` → run ALL phases 0-14, comprehensive mode (2/10 confidence gate). Combinable with scope flags.
+1. If no flags → run ALL phases 0-15, daily mode (8/10 confidence gate).
+2. If `--comprehensive` → run ALL phases 0-15, comprehensive mode (2/10 confidence gate). Combinable with scope flags.
 3. Scope flags (`--infra`, `--code`, `--skills`, `--supply-chain`, `--owasp`, `--scope`) are **mutually exclusive**. If multiple scope flags are passed, **error immediately**: "Error: --infra and --code are mutually exclusive. Pick one scope flag, or run `/cso` with no flags for a full audit." Do NOT silently pick one — security tooling must never ignore user intent.
 4. `--diff` is combinable with ANY scope flag AND with `--comprehensive`.
 5. When `--diff` is active, each phase constrains scanning to files/configs changed on the current branch vs the base branch. For git history scanning (Phase 2), `--diff` limits to commits on the current branch only.
-6. Phases 0, 1, 12, 13, 14 ALWAYS run regardless of scope flag.
+6. Phases 0, 1, 13, 14, 15 ALWAYS run regardless of scope flag. Phase 12 (Billing & Account Lifecycle Integrity) runs in full and `--code` modes, and is skipped automatically when the project has no billing/accounts.
 7. If WebSearch is unavailable, skip checks that require it and note: "WebSearch unavailable — proceeding with local-only analysis."
 
 ---
@@ -573,7 +570,35 @@ INFRASTRUCTURE SURFACE
 
 > **STOP.** Before running the scope-dependent audit phases (Phases 2-11) selected by the resolved mode, after the Phase 0 stack detection and Phase 1 attack-surface census, Read `~/.claude/skills/gstack/cso/sections/audit-phases.md` and execute it
 > in full. Do not work from memory — that section is the source of truth for this step.
-### Phase 12: False Positive Filtering + Active Verification
+### Phase 12: Billing & Account Lifecycle Integrity
+
+Run this for any app with subscriptions, billing, or user accounts. Detect it from Phase 0/1: a billing integration (Stripe, Paddle, Chargebee, LemonSqueezy, RevenueCat), a webhook handler, a `subscription_tier`/`plan`/`status` column, or a checkout route. If none of that exists, write one line — "no billing or account lifecycle — skipped" — and move on.
+
+This is money correctness, not exploit hunting, so the 8/10 security confidence gate does NOT apply here — these are deterministic code-trace findings, not probabilistic exploits. A broken lifecycle does not let an attacker in. It does something arguably worse for a small team: it charges a customer and gives them nothing, keeps billing someone who already left, or strands a returning customer. These almost never show up in tests, because the one path everyone tests ("new user subscribes") works. They surface as refunds, chargebacks, and support tickets. Report them in a **separate "Billing & Account Lifecycle Integrity" section** of the report, NOT the security findings table, and rate severity by business impact: billed-with-no-access or billed-after-leaving is HIGH/CRITICAL; cosmetic status drift is LOW.
+
+Trace the real code (the webhook handler, checkout/portal routes, the users/subscription table and its CHECK constraints, and every place tier/status is read to gate a paid feature). Code-tracing only, no live calls. Answer each with file:line evidence, or "absent — no such code":
+
+1. **Webhook event coverage.** List every billing event the handler actually branches on, then compare against the events that drive the whole lifecycle: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`, `invoice.payment_succeeded`, and refund/dispute events (`charge.refunded`, `charge.dispute.created`). For EACH lifecycle event not handled, state the concrete drift it causes. The classic miss is `customer.subscription.updated` — its absence silently breaks plan changes AND payment recovery at the same time.
+
+2. **Plan change (upgrade/downgrade).** If a user switches plans in the provider's customer portal, does the stored tier update? If tier is derived once at checkout and never re-synced from the live subscription's price, the user pays one tier while the app serves another, including the perverse upgrade case where they pay MORE and get a 403 because the entitlement check still reads the old tier.
+
+3. **Payment failure then recovery.** A failed card moves status to `past_due`/`unpaid`. When the customer fixes the card and the provider recovers the charge, does status return to `active`? If only the failure event is handled and not the recovery (`invoice.payment_succeeded`, or `subscription.updated` back to active), the customer is billed in full but locked out forever with no self-serve fix.
+
+4. **Cancellation semantics.** Cancel-at-period-end vs immediate. Does the user keep access until the period ends and then get downgraded? Confirm the downgrade is INTENTIONAL (the handler reacts to the cancel / `deleted` event) and not accidental (it "works" only because the cancel event is dropped, so a future handler change would silently break the keep-access guarantee). Is the end date persisted and surfaced so the UI can say "cancels on X"?
+
+5. **Enum / CHECK-constraint consistency.** Cross-check every tier/status string the code WRITES against the DB CHECK constraint, enum, or migration. A value the webhook writes but the schema rejects makes the entitlement UPDATE fail — the customer is charged by the provider but the row is never provisioned. A newly added tier wired in code but never migrated into the constraint is the canonical version of this.
+
+6. **Entitlement consistency across features.** Is every paid feature gated on the SAME rule (tier AND status), or does one path check `status == 'active'` while another keys only on tier? Mismatched gates mean a `past_due` user is locked out of one feature but keeps full paid use of another. Pick one policy and enforce it everywhere.
+
+7. **Account deletion and billing.** Is there a delete-account / close-account path at all? If yes, trace whether it CANCELS the active subscription FIRST (look up the billing customer, cancel its subscriptions) before deleting the user. If it deletes the user but leaves the subscription active, the ex-customer keeps getting billed with no way to log in to stop it — CRITICAL, this is the chargeback path. If there is NO delete path, flag both the right-to-erasure gap AND that the de-facto manual delete (an operator removing the auth user) does nothing to the billing provider, so the card keeps getting charged.
+
+8. **Return / re-subscribe.** When a cancelled or deleted user comes back: does checkout reconnect to their EXISTING billing customer (lookup by email or a stable id), or mint a new one, orphaning the old subscription and risking double billing? Can they re-register the same email after deletion, or is the email orphaned/blocked by a stale row? Is their prior data recoverable or already cascade-deleted?
+
+9. **Deletion cascade integrity.** Are child rows (usage logs, uploads, domain data) wired with consistent `ON DELETE` behavior so a delete tears the graph down cleanly, instead of orphaning rows or blocking the delete on a foreign key?
+
+For each gap: the concrete user-facing consequence step by step, the file:line, and the fix. Collect them under a "Billing & Account Lifecycle Integrity" heading in the report (Phase 15) and in the `lifecycle_integrity` array of the saved JSON.
+
+### Phase 13: False Positive Filtering + Active Verification
 
 Before producing findings, run every candidate through this filter.
 
@@ -662,7 +687,7 @@ Launch all verifiers in parallel. Discard findings where the verifier scores bel
 
 If the Agent tool is unavailable, self-verify by re-reading code with a skeptic's eye. Note: "Self-verified — independent sub-task unavailable."
 
-### Phase 13: Findings Report + Trend Tracking + Remediation
+### Phase 14: Findings Report + Trend Tracking + Remediation
 
 **Exploit scenario requirement:** Every finding MUST include a concrete exploit scenario — a step-by-step attack path an attacker would follow. "This pattern is insecure" is not a finding.
 
@@ -740,6 +765,32 @@ confirms it IS a real issue, that is a calibration event. Your initial confidenc
 too low. Log the corrected pattern as a learning so future reviews catch it with
 higher confidence.
 
+## Invariant-First Finding Format
+
+Pattern-matching a finding to a known-bad signature catches the bugs you have seen before. Naming the broken invariant catches the ones you have not. For every finding, also state the invariant it breaks and the trust boundary it breaks at, not just the CWE it resembles:
+
+**Format:** [SEVERITY] (confidence: N/10) file:line — invariant "<name>" no longer holds at <boundary>: <what the code does instead>
+
+The recurring boundary invariants:
+- **Authorization re-checked server-side, every request** (broken by IDOR, forced browsing, mass assignment).
+- **Code and data travel in separate channels** (broken by SQL/command/template injection, and by prompt injection: model input is data, never instructions).
+- **Identity is cryptographically bound and verified** (broken by JWT alg=none, key confusion, SAML XSW).
+- **Durable-memory reads are validated like untrusted input** (broken by memory poisoning, trusted-cache or trusted-config reads).
+- **Least privilege at the tool or capability boundary** (broken by excessive agency, SSRF, and the lethal trifecta: private data + untrusted input + an egress channel in one component).
+
+Why it matters: a deny-list of patterns is incomplete over an unbounded attack surface, so signature review misses the unseen variant. An invariant is a positive property the code must hold, so a never-before-seen bug still maps to "invariant X is no longer guaranteed." Use the pattern to find the candidate; use the invariant to judge whether it is real and to generalize the fix.
+
+Caveat at the model boundary: an LLM cannot reliably separate instructions from data, so the instruction-and-data-separation invariant often cannot be restored by validation. When it cannot, the fix is blast-radius reduction (least privilege, human approval for consequential actions, deny one leg of the trifecta), not "sanitize the input harder."
+
+## Agent & Trust-Boundary Review Checks
+
+For code that builds AI agents or tools, or anything that reads external or persisted input, run these four checks alongside the invariants above. They catch architectural failures a per-line scan misses. (Ported from the offensive-security / ai-red-teaming canon via the second-brain cross-pollination layer.)
+
+- **Lethal-trifecta audit.** Model each agent or component as three legs: access to private/sensitive data ∧ ingestion of untrusted/external content ∧ an outbound egress channel. All three co-located in one trust context is a *lethal trifecta* — report it as an architectural finding, not a lint. The fix is to cut one leg structurally (quarantine untrusted-content readers from private-data tools, or strip egress from any component that touches untrusted input), never a ~95%-accurate classifier.
+- **Memory as a trust store (validate on read).** Treat durable or persisted state — caches, agent-written records, auto-captured memory, config read at runtime — as untrusted input at READ time. Provenance-tag on write; re-validate on read before it drives a decision. Flag any path that reads persisted or agent-written state and acts on it without re-checking.
+- **Least-privilege / blast-radius bounding.** Check that standing capability is bounded up front: minimum tool set, least-scope credentials, read tools split from write tools, irreversible actions human-gated. Flag excessive standing capability regardless of how safe the current prompt looks — bounding it caps the damage whether the agent is merely confident or actually compromised.
+- **Differential (two-session) reasoning.** Some defects are a missing behavior *delta* invisible to single-observation review: prompt-injection compliance, scope creep, missing authz between roles. Where it applies, reason about paired inputs that differ in exactly one privileged dimension (authed vs unauthed, benign vs injected) and assert the output diverges correctly — not just that a single input looks fine.
+
 For each finding:
 ```
 ## Finding N: [Title] — [File:Line]
@@ -788,7 +839,7 @@ Match findings across reports using the `fingerprint` field (sha256 of category 
    - C) Accept risk — [document why, set review date]
    - D) Defer to TODOS.md with security label
 
-### Phase 14: Save Report
+### Phase 15: Save Report
 
 ```bash
 mkdir -p .gstack/security-reports

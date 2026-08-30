@@ -19,7 +19,7 @@ echo "DIFF_SIZE: $DIFF_TOTAL"
 ```bash
 # Codex preflight: one block (functions sourced here don't persist to later blocks).
 _TEL=$(~/.claude/skills/gstack/bin/gstack-config get telemetry 2>/dev/null || echo off)
-_CODEX_CFG=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo enabled)
+_CODEX_CFG=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo disabled)
 source ~/.claude/skills/gstack/bin/gstack-codex-probe 2>/dev/null || true
 if [ "$_CODEX_CFG" = "disabled" ]; then
   _CODEX_MODE="disabled"
