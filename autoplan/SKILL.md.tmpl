@@ -257,7 +257,7 @@ workflow.
 
 ```bash
 _TEL=$(~/.claude/skills/gstack/bin/gstack-config get telemetry 2>/dev/null || echo off)
-_CODEX_CFG=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo enabled)
+_CODEX_CFG=$(~/.claude/skills/gstack/bin/gstack-config get codex_reviews 2>/dev/null || echo disabled)
 source ~/.claude/skills/gstack/bin/gstack-codex-probe
 
 # Master switch first: codex_reviews=disabled turns off ALL Codex work globally,

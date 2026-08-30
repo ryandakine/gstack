@@ -104,16 +104,20 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #                           #   --no-plan-tune-hooks, or env GSTACK_PLAN_TUNE_HOOKS.
 #
 # ─── Advanced ────────────────────────────────────────────────────────
-# codex_reviews: enabled    # Master switch for Codex cross-model review. enabled =
-#                           #   Codex runs as a standard step in /review, /ship,
-#                           #   /document-release, plan reviews, and /autoplan (auto
-#                           #   falls back to a Claude subagent if Codex is missing or
-#                           #   not authenticated). disabled = skip all Codex passes.
+# codex_reviews: disabled  # Master switch for Codex cross-model review. Defaults to
+#                           #   disabled (opt-in policy: Codex burns finite ChatGPT
+#                           #   Plus quota, so it never fires unbidden).
+#                           #   enabled = Codex runs as a standard step in /review,
+#                           #   /ship, /document-release, plan reviews, and /autoplan
+#                           #   (auto falls back to a Claude subagent if Codex is
+#                           #   missing or not authenticated). disabled = skip all
+#                           #   Codex passes.
 #                           #   Asymmetry on disabled: diff-review (/review, /ship) still
 #                           #   runs the free Claude adversarial subagent; plan-review and
 #                           #   /document-release skip the outside-voice step entirely.
 #                           #   An invalid value is REJECTED (existing value preserved) so
 #                           #   a typo cannot silently turn paid Codex calls on or off.
+#                           #   Re-enable: gstack-config set codex_reviews enabled
 # gstack_contributor: false # true = file field reports when gstack misbehaves
 # skip_eng_review: false    # true = skip eng review gate in /ship (not recommended)
 #
@@ -140,7 +144,7 @@ lookup_default() {
     checkpoint_mode) echo "explicit" ;;
     checkpoint_push) echo "false" ;;
     explain_level) echo "default" ;;
-    codex_reviews) echo "enabled" ;;
+    codex_reviews) echo "disabled" ;;
     gstack_contributor) echo "false" ;;
     skip_eng_review) echo "false" ;;
     workspace_root) echo "$HOME/conductor/workspaces" ;;

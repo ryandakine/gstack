@@ -12,9 +12,10 @@
  * nested spawns with a one-line notice; GSTACK_FORCE_CODEX_REVIEW=1
  * overrides.
  */
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, afterAll } from 'bun:test';
 import { spawnSync } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { codexPreflight } from '../scripts/resolvers/constants';
 
@@ -28,14 +29,35 @@ function preflightBash(): string {
   return rendered.slice(start, end);
 }
 
+// An isolated HOME with a stub `gstack-config` that always answers
+// codex_reviews=enabled — these tests exercise the under_codex/not_installed
+// branches, which must be reachable regardless of the master switch's actual
+// default (codex_reviews defaults to disabled as of the codex_via_inbox
+// removal; stubbing the resolved value, rather than relying on a `||`
+// fallback baked into the preflight bash, keeps this test independent of
+// that default).
+const STUB_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-under-codex-home-'));
+const STUB_BIN_DIR = path.join(STUB_HOME, '.claude', 'skills', 'gstack', 'bin');
+fs.mkdirSync(STUB_BIN_DIR, { recursive: true });
+fs.writeFileSync(
+  path.join(STUB_BIN_DIR, 'gstack-config'),
+  '#!/usr/bin/env bash\ncase "$2" in\n  codex_reviews) echo enabled ;;\n  telemetry) echo off ;;\n  *) echo "" ;;\nesac\n',
+  { mode: 0o755 },
+);
+afterAll(() => {
+  fs.rmSync(STUB_HOME, { recursive: true, force: true });
+});
+
 function runPreflight(env: Record<string, string>): string {
   const result = spawnSync('bash', ['-c', `set +e\n${preflightBash()}`], {
     env: {
-      // Minimal PATH without codex so the not_installed branch is reachable
-      // and no real gstack-config/codex runs. The block's fallbacks
-      // (`|| echo enabled`) keep it self-contained.
+      // Minimal PATH without codex so the not_installed branch is reachable.
+      // HOME points at a stub gstack-config (codex_reviews=enabled) so
+      // these tests exercise the under_codex/not_installed logic independent
+      // of the real default; no real gstack-codex-probe exists, which is
+      // fine — the `source ... || true` fallback in the preflight handles it.
       PATH: '/usr/bin:/bin',
-      HOME: '/nonexistent-home',
+      HOME: STUB_HOME,
       ...env,
     },
     timeout: 10000,
