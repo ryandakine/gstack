@@ -387,7 +387,10 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     // +Conductor AUQ-default-prose rule + one-way/continuation safety in the
     // always-loaded AskUserQuestion Format section.
     // v1.2.0 activation lift: first-run-guidance section in the shared preamble.
-    maxSkeletonBytes: 57_390, // token-reduction Phases 1-2 (v1.69.x branch); measured 56,789
+    // Fork port: cso Phase 12 "Billing & Account Lifecycle Integrity" is
+    // deliberately always-loaded (security/money correctness), not carved
+    // into a section — see mustStayInSkeleton above. Adds ~9.2KB; measured 66,571.
+    maxSkeletonBytes: 67_200, // token-reduction Phases 1-2 (v1.69.x branch); measured 56,789
     minUnionBytes: 64_200, // token-reduction Phases 1-2 (v1.69.x branch); measured union 71,379
     mustContain: ['OWASP', 'STRIDE', 'daily', 'comprehensive', 'verif'],
     // cso keeps its mode-dispatch + FP-filtering phases always-loaded, so the
@@ -424,7 +427,10 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
       gateAfterStop: undefined, // operational multi-STOP skill, like ship
     },
     behavioral: 'plan',
-    maxSkeletonBytes: 57_660, // ponytail-import wave: reuse ladder + bounded closer + shortcut trail (AUQ repetition cut netted -236B, gated); measured 57_053
+    // Fork port: invariant-first finding format + trust-boundary pre-emit
+    // verification gate (cross-domain steal from offensive-security) adds
+    // ~3.8KB to the always-loaded skeleton; measured 60,858.
+    maxSkeletonBytes: 61_500, // ponytail-import wave: reuse ladder + bounded closer + shortcut trail (AUQ repetition cut netted -236B, gated); measured 57_053
     minUnionBytes: 89_000, // Phase 4 wave 1; measured union 93,357
     mustContain: ['confidence', 'P1', 'P2', 'Review Army', 'adversarial'],
   },
