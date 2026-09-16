@@ -10,6 +10,7 @@
  * Shipped as Release 2 of the self-learning roadmap (SELF_LEARNING_V0.md).
  */
 import type { TemplateContext } from './types';
+import { CC_BACKGROUND_DEFAULT_SINCE } from './constants';
 
 function generateSpecialistSelection(ctx: TemplateContext): string {
   const isShip = ctx.skillName === 'ship';
@@ -30,8 +31,9 @@ STACK=""
 [ -f go.mod ] && STACK="\${STACK}go "
 [ -f Cargo.toml ] && STACK="\${STACK}rust "
 echo "STACK: \${STACK:-unknown}"
-DIFF_INS=$(git diff origin/<base> --stat | tail -1 | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
-DIFF_DEL=$(git diff origin/<base> --stat | tail -1 | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
+DIFF_BASE=$(git merge-base origin/<base> HEAD)
+DIFF_INS=$(git diff "$DIFF_BASE" --stat | tail -1 | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
+DIFF_DEL=$(git diff "$DIFF_BASE" --stat | tail -1 | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
 DIFF_LINES=$((DIFF_INS + DIFF_DEL))
 echo "DIFF_LINES: $DIFF_LINES"
 # Detect test framework for specialist test stub generation
@@ -65,7 +67,8 @@ Based on the scope signals above, select which specialists to dispatch.
 4. **Performance** — if SCOPE_BACKEND=true OR SCOPE_FRONTEND=true. Read \`${ctx.paths.skillRoot}/review/specialists/performance.md\`
 5. **Data Migration** — if SCOPE_MIGRATIONS=true. Read \`${ctx.paths.skillRoot}/review/specialists/data-migration.md\`
 6. **API Contract** — if SCOPE_API=true. Read \`${ctx.paths.skillRoot}/review/specialists/api-contract.md\`
-7. **Design** — if SCOPE_FRONTEND=true. Use the existing design review checklist at \`${ctx.paths.skillRoot}/review/design-checklist.md\`
+7. **Design** — if SCOPE_FRONTEND=true. Use the existing design review checklist at \`${ctx.paths.skillRoot}/review/design-checklist.md\` and run the mechanical pass at the top of that checklist (the user-installed design detector, when present) before the LLM items
+8. **Simplification** — if DIFF_LINES > 100. Read \`${ctx.paths.skillRoot}/review/specialists/simplification.md\`. Advisory-only lens: hunts unrequested structure (hand-rolled stdlib, one-implementation abstractions, dependencies duplicating platform features), never coverage.
 
 ### Adaptive gating
 
@@ -75,7 +78,7 @@ For each conditional specialist that passed scope gating, check the \`gstack-spe
 - If tagged \`[GATE_CANDIDATE]\` (0 findings in 10+ dispatches): skip it. Print: "[specialist] auto-gated (0 findings in N reviews)."
 - If tagged \`[NEVER_GATE]\`: always dispatch regardless of hit rate. Security and data-migration are insurance policy specialists — they should run even when silent.
 
-**Force flags:** If the user's prompt includes \`--security\`, \`--performance\`, \`--testing\`, \`--maintainability\`, \`--data-migration\`, \`--api-contract\`, \`--design\`, or \`--all-specialists\`, force-include that specialist regardless of gating.
+**Force flags:** If the user's prompt includes \`--security\`, \`--performance\`, \`--testing\`, \`--maintainability\`, \`--data-migration\`, \`--api-contract\`, \`--design\`, \`--simplification\`, or \`--all-specialists\`, force-include that specialist regardless of gating.
 
 Note which specialists were selected, gated, and skipped. Print the selection:
 "Dispatching N specialists: [names]. Skipped: [names] (scope not detected). Gated: [names] (0 findings in N+ reviews)."`;
@@ -105,7 +108,7 @@ If learnings are found, include them: "Past learnings for this domain: {learning
 4. Instructions:
 
 "You are a specialist code reviewer. Read the checklist below, then run
-\`git diff origin/<base>\` to get the full diff. Apply the checklist against the diff.
+\`DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"\` to get the full diff. Apply the checklist against the diff.
 
 For each finding, output a JSON object on its own line:
 {\\"severity\\":\\"CRITICAL|INFORMATIONAL\\",\\"confidence\\":N,\\"path\\":\\"file\\",\\"line\\":N,\\"category\\":\\"category\\",\\"summary\\":\\"description\\",\\"fix\\":\\"recommended fix\\",\\"fingerprint\\":\\"path:line:category\\",\\"specialist\\":\\"name\\"}
@@ -128,7 +131,7 @@ CHECKLIST:
 
 **Subagent configuration:**
 - Use \`subagent_type: "general-purpose"\`
-- Do NOT use \`run_in_background\` — all specialists must complete before merge
+- Pass \`run_in_background: false\` on every specialist Agent call — subagents run in the BACKGROUND by default since ${CC_BACKGROUND_DEFAULT_SINCE}, and all specialists must complete before merge. (Merely omitting the flag no longer produces a foreground run; it must be explicitly false.)
 - If any specialist subagent fails or times out, log the failure and continue with results from successful specialists. Specialists are additive — partial results are better than no results.`;
 }
 
@@ -166,8 +169,14 @@ Group findings by fingerprint. For findings sharing the same fingerprint:
 - Confidence 3-4: move to appendix (suppress from main findings)
 - Confidence 1-2: suppress entirely
 
+**Advisory carve-out (simplification specialist):**
+Findings with \`"advisory": true\` are excluded from BOTH the quality_score
+summation and the findings-count header below — they are structure suggestions,
+not defects, and must not make "5 findings … 10/10" look contradictory. In
+Fix-First they are ASK-only: NEVER auto-applied, even when mechanical.
+
 **Compute PR Quality Score:**
-After merging, compute the quality score:
+After merging, compute the quality score over NON-advisory findings only:
 \`quality_score = max(0, 10 - (critical_count * 2 + informational_count * 0.5))\`
 Cap at 10. Log this in the review result at the end.
 
@@ -177,7 +186,8 @@ Present the merged findings in the same format as the current review:
 \`\`\`
 SPECIALIST REVIEW: N findings (X critical, Y informational) from Z specialists
 
-[For each finding, in order: CRITICAL first, then INFORMATIONAL, sorted by confidence descending]
+[For each finding, in order: CRITICAL first, then INFORMATIONAL, sorted by confidence descending;
+ advisory findings last, each rendered with an [ADVISORY] label in place of the severity]
 [SEVERITY] (confidence: N/10, specialist: name) path:line — summary
   Fix: recommended fix
   [If MULTI-SPECIALIST CONFIRMED: show confirmation note]
@@ -185,19 +195,32 @@ SPECIALIST REVIEW: N findings (X critical, Y informational) from Z specialists
 PR Quality Score: X/10
 \`\`\`
 
+**Simplification footer (after the score line):**
+- If the simplification specialist was dispatched and returned findings, sum
+  their \`lines_removable\` values and print: \`net: -N lines possible\` (omit
+  findings without the field from the sum).
+- If it was dispatched and returned NO FINDINGS, print:
+  \`Simplification: lean already — nothing to cut.\`
+- If it was not dispatched, print neither line.
+
 These findings flow into ${fixFirstRef} alongside ${critPassRef}.
-The Fix-First heuristic applies identically — specialist findings follow the same AUTO-FIX vs ASK classification.
+The Fix-First heuristic applies identically — specialist findings follow the same AUTO-FIX vs ASK classification (except advisory findings, which are ASK-only per the carve-out above).
 
 **Compile per-specialist stats:**
 After merging findings, compile a \`specialists\` object for ${persistRef}.
-For each specialist (testing, maintainability, security, performance, data-migration, api-contract, design, red-team):
+For each specialist (testing, maintainability, security, performance, data-migration, api-contract, design, simplification, red-team):
 - If dispatched: \`{"dispatched": true, "findings": N, "critical": N, "informational": N}\`
 - If skipped by scope: \`{"dispatched": false, "reason": "scope"}\`
 - If skipped by gating: \`{"dispatched": false, "reason": "gated"}\`
 - If not applicable (e.g., red-team not activated): omit from the object
 
+Advisory findings COUNT in the stats \`findings\` field — the advisory
+carve-out governs the quality score and the findings-count header only.
+Logging simplification's advisories as \`findings: 0\` would auto-gate the
+lens into permanent silence after 10 dispatches.
+
 Include the Design specialist even though it uses \`design-checklist.md\` instead of the specialist schema files.
-Remember these stats — you will need them for the review-log entry in Step 5.8.`;
+Remember these stats — you will need them for ${persistRef}.`;
 }
 
 function generateRedTeam(ctx: TemplateContext): string {
@@ -208,7 +231,7 @@ function generateRedTeam(ctx: TemplateContext): string {
 
 **Activation:** Only if DIFF_LINES > 200 OR any specialist produced a CRITICAL finding.
 
-If activated, dispatch one more subagent via the Agent tool (foreground, not background).
+If activated, dispatch one more subagent via the Agent tool (pass \`run_in_background: false\` — foreground; subagents default to background since ${CC_BACKGROUND_DEFAULT_SINCE}).
 
 The Red Team subagent receives:
 1. The red-team checklist from \`${ctx.paths.skillRoot}/review/specialists/red-team.md\`
@@ -217,7 +240,7 @@ The Red Team subagent receives:
 
 Prompt: "You are a red team reviewer. The code has already been reviewed by N specialists
 who found the following issues: {merged findings summary}. Your job is to find what they
-MISSED. Read the checklist, run \`git diff origin/<base>\`, and look for gaps.
+MISSED. Read the checklist, run \`DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"\`, and look for gaps.
 Output findings as JSON objects (same schema as the specialists). Focus on cross-cutting
 concerns, integration boundary issues, and failure modes that specialist checklists
 don't cover."

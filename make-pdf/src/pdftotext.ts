@@ -13,17 +13,20 @@
  *        between paragraphs, and homoglyph substitution. We add a word-token
  *        diff and a paragraph-boundary assertion on top.
  *
- * Resolution order for the pdftotext binary:
- *   1. $PDFTOTEXT_BIN env override
- *   2. `which pdftotext` on PATH
- *   3. standard Homebrew paths on macOS
- *   4. throws a friendly "install poppler" error
+ * Resolution order for the pdftotext binary (v1.24-aligned):
+ *   1. $GSTACK_PDFTOTEXT_BIN env override (preferred, matches v1.24 GSTACK_*_BIN pattern)
+ *   2. $PDFTOTEXT_BIN env override (back-compat alias)
+ *   3. PATH lookup via Bun.which('pdftotext') — handles Windows PATHEXT natively
+ *   4. standard POSIX paths (Homebrew + distro) — no Windows candidates because
+ *      Poppler scatters across Scoop / Chocolatey / oschwartz10612-poppler-windows
+ *      and guessing causes false positives. Set GSTACK_PDFTOTEXT_BIN explicitly.
+ *   5. throws a friendly "install poppler" error
  *
  * The wrapper is *optional at runtime*: production renders don't need it.
  * Only the CI gate and unit tests invoke pdftotext.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -42,29 +45,50 @@ export interface PdftotextInfo {
 }
 
 /**
+ * Probe a base path for executability, honoring Windows extension suffixes.
+ */
+export function findExecutable(base: string): string | null {
+  if (isExecutable(base)) return base;
+  if (process.platform === "win32") {
+    for (const ext of [".exe", ".cmd", ".bat"]) {
+      const withExt = base + ext;
+      if (isExecutable(withExt)) return withExt;
+    }
+  }
+  return null;
+}
+
+function resolveOverride(value: string | undefined, env: NodeJS.ProcessEnv): string | null {
+  if (!value?.trim()) return null;
+  const trimmed = value.trim().replace(/^"(.*)"$/, '$1');
+  if (path.isAbsolute(trimmed)) return findExecutable(trimmed);
+  const PATH = env.PATH ?? env.Path ?? '';
+  return Bun.which(trimmed, { PATH }) ?? null;
+}
+
+/**
  * Locate pdftotext. Throws PdftotextUnavailableError if none is found.
  */
-export function resolvePdftotext(): PdftotextInfo {
-  const envOverride = process.env.PDFTOTEXT_BIN;
-  if (envOverride && isExecutable(envOverride)) {
-    return describeBinary(envOverride);
-  }
+export function resolvePdftotext(env: NodeJS.ProcessEnv = process.env): PdftotextInfo {
+  // 1 + 2: env overrides (GSTACK_PDFTOTEXT_BIN preferred, PDFTOTEXT_BIN back-compat).
+  const overrideRaw = env.GSTACK_PDFTOTEXT_BIN ?? env.PDFTOTEXT_BIN;
+  const override = resolveOverride(overrideRaw, env);
+  if (override) return describeBinary(override);
 
-  // Try PATH
-  try {
-    const which = execFileSync("which", ["pdftotext"], { encoding: "utf8" }).trim();
-    if (which && isExecutable(which)) return describeBinary(which);
-  } catch {
-    // fall through
-  }
+  // 3: PATH lookup via Bun.which — handles Windows PATHEXT natively.
+  const PATH = env.PATH ?? env.Path ?? '';
+  const onPath = Bun.which('pdftotext', { PATH });
+  if (onPath) return describeBinary(onPath);
 
-  // Common macOS Homebrew locations
-  const macCandidates = [
-    "/opt/homebrew/bin/pdftotext",     // Apple Silicon
+  // 4: POSIX-only standard locations. No Windows candidates — Poppler installs
+  // scatter across Scoop/Chocolatey/portable zips and guessing causes false
+  // positives. Windows users set GSTACK_PDFTOTEXT_BIN explicitly.
+  const posixCandidates = [
+    "/opt/homebrew/bin/pdftotext",     // Apple Silicon Homebrew
     "/usr/local/bin/pdftotext",        // Intel Mac or Linuxbrew
     "/usr/bin/pdftotext",              // distro package
   ];
-  for (const candidate of macCandidates) {
+  for (const candidate of posixCandidates) {
     if (isExecutable(candidate)) return describeBinary(candidate);
   }
 
@@ -75,17 +99,51 @@ export function resolvePdftotext(): PdftotextInfo {
     "(Runtime rendering does NOT need it. This only affects tests.)",
     "",
     "To install:",
-    "  macOS:  brew install poppler",
-    "  Ubuntu: sudo apt-get install poppler-utils",
-    "  Fedora: sudo dnf install poppler-utils",
+    "  macOS:    brew install poppler",
+    "  Ubuntu:   sudo apt-get install poppler-utils",
+    "  Fedora:   sudo dnf install poppler-utils",
+    "  Windows:  scoop install poppler  (or download from",
+    "            https://github.com/oschwartz10612/poppler-windows)",
     "",
-    "Or set PDFTOTEXT_BIN to an explicit path:",
-    "  export PDFTOTEXT_BIN=/path/to/pdftotext",
+    "Or set GSTACK_PDFTOTEXT_BIN to an explicit path:",
+    process.platform === "win32"
+      ? '  setx GSTACK_PDFTOTEXT_BIN "C:\\path\\to\\pdftotext.exe"'
+      : "  export GSTACK_PDFTOTEXT_BIN=/path/to/pdftotext",
   ].join("\n"));
+}
+
+/**
+ * Locate a poppler companion tool (pdffonts, pdfimages, pdftoppm) used by the
+ * emoji render gate. Mirrors resolvePdftotext's resolution order:
+ *   1. $GSTACK_<TOOL>_BIN env override (e.g. GSTACK_PDFFONTS_BIN)
+ *   2. PATH via Bun.which
+ *   3. standard POSIX locations (Homebrew + distro)
+ *
+ * Returns null (does NOT throw) when the tool is missing — the emoji gate skips
+ * cleanly rather than failing on a box without full poppler-utils.
+ */
+export function resolvePopplerTool(
+  tool: "pdffonts" | "pdfimages" | "pdftoppm",
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const override = resolveOverride(env[`GSTACK_${tool.toUpperCase()}_BIN`], env);
+  if (override) return override;
+
+  const PATH = env.PATH ?? env.Path ?? "";
+  const onPath = Bun.which(tool, { PATH });
+  if (onPath) return onPath;
+
+  for (const dir of ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]) {
+    const candidate = findExecutable(path.join(dir, tool));
+    if (candidate) return candidate;
+  }
+  return null;
 }
 
 function isExecutable(p: string): boolean {
   try {
+    // access(X_OK) is true for directories (the traverse bit); only regular files count.
+    if (!fs.statSync(p).isFile()) return false;
     fs.accessSync(p, fs.constants.X_OK);
     return true;
   } catch {
@@ -96,19 +154,25 @@ function isExecutable(p: string): boolean {
 function describeBinary(bin: string): PdftotextInfo {
   let version = "unknown";
   let flavor: PdftotextInfo["flavor"] = "unknown";
-  try {
-    // pdftotext -v writes to stderr and exits 0 on poppler, 99 on some xpdf builds.
-    const result = execFileSync(bin, ["-v"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    version = (result || "").trim().split("\n")[0] || "unknown";
-  } catch (err: any) {
-    // Many pdftotext builds exit non-zero on -v but still write to stderr.
-    const stderr = err?.stderr?.toString?.() ?? "";
-    version = stderr.trim().split("\n")[0] || "unknown";
-  }
-  const v = version.toLowerCase();
+
+  // spawnSync, not execFileSync: poppler writes -v output to STDERR and exits 0,
+  // so execFileSync neither returns it (it returns stdout, which is empty) nor
+  // throws (which is what made the stderr fallback below reachable). The result
+  // was version="unknown" flavor="unknown" on every poppler install. spawnSync
+  // hands back both streams regardless of exit status, which also covers the
+  // xpdf builds that exit 99.
+  const res = spawnSync(bin, ["-v"], { encoding: "utf8" });
+  const raw = `${res.stdout ?? ""}\n${res.stderr ?? ""}`;
+
+  // The version banner is not reliably the first line once both streams are in
+  // play, so match it rather than taking line 0.
+  const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
+  version = lines.find(l => /pdftotext\s+version/i.test(l)) ?? lines[0] ?? "unknown";
+
+  // Flavor comes from the WHOLE banner, never the version line alone: poppler
+  // prints "pdftotext version 26.06.0" on line 1 and only identifies itself on
+  // line 2, "Copyright ... The Poppler Developers".
+  const v = raw.toLowerCase();
   if (v.includes("poppler")) flavor = "poppler";
   else if (v.includes("xpdf")) flavor = "xpdf";
   return { bin, version, flavor };

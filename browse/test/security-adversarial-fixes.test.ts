@@ -19,31 +19,10 @@ import { PAGE_CONTENT_COMMANDS } from '../src/commands';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
-describe('canary stream-chunk split detection', () => {
-  test('detectCanaryLeak uses rolling buffer across consecutive deltas', () => {
-    // Pull in the function via dynamic require so we don't re-export it
-    // from sidebar-agent.ts (it's internal on purpose).
-    const agentSource = fs.readFileSync(
-      path.join(REPO_ROOT, 'browse', 'src', 'sidebar-agent.ts'),
-      'utf-8',
-    );
-    // Contract: detectCanaryLeak accepts an optional DeltaBuffer and
-    // uses .slice(-(canary.length - 1)) to retain a rolling tail.
-    expect(agentSource).toContain('DeltaBuffer');
-    expect(agentSource).toMatch(/text_delta\s*=\s*combined\.slice\(-\(canary\.length - 1\)\)/);
-    expect(agentSource).toMatch(/input_json_delta\s*=\s*combined\.slice\(-\(canary\.length - 1\)\)/);
-  });
-
-  test('canary context initializes deltaBuf', () => {
-    const agentSource = fs.readFileSync(
-      path.join(REPO_ROOT, 'browse', 'src', 'sidebar-agent.ts'),
-      'utf-8',
-    );
-    // The askClaude call site must construct the buffer so the rolling
-    // detection actually runs.
-    expect(agentSource).toContain("deltaBuf: { text_delta: '', input_json_delta: '' }");
-  });
-});
+// canary stream-chunk split detection — tested detectCanaryLeak inside
+// sidebar-agent.ts. Both the chat-stream pipeline and the function are
+// gone (Terminal pane uses an interactive PTY; user keystrokes are the
+// trust source, no chunked LLM stream to canary-scan).
 
 describe('tool-output ensemble rule (single-layer BLOCK)', () => {
   test('user-input context: single layer at BLOCK degrades to WARN', () => {
@@ -71,7 +50,7 @@ describe('tool-output ensemble rule (single-layer BLOCK)', () => {
     const result = combineVerdict(
       [
         { layer: 'testsavant_content', confidence: 0.80 },
-        { layer: 'transcript_classifier', confidence: 0.75 },
+        { layer: 'transcript_classifier', confidence: 0.75, meta: { verdict: 'block' } },
       ],
       { toolOutput: true },
     );
@@ -105,26 +84,11 @@ describe('snapshot in PAGE_CONTENT_COMMANDS', () => {
   });
 });
 
-describe('transcript classifier tool_output parameter', () => {
-  test('checkTranscript accepts optional tool_output', () => {
-    const src = fs.readFileSync(
-      path.join(REPO_ROOT, 'browse', 'src', 'security-classifier.ts'),
-      'utf-8',
-    );
-    expect(src).toContain('tool_output?: string');
-    expect(src).toContain('tool_output');
-    // Haiku prompt mentions tool_output
-    expect(src).toContain('tool_output');
-  });
-
-  test('sidebar-agent passes tool text to transcript on tool-result scan', () => {
-    const src = fs.readFileSync(
-      path.join(REPO_ROOT, 'browse', 'src', 'sidebar-agent.ts'),
-      'utf-8',
-    );
-    expect(src).toContain('tool_output: text');
-  });
-});
+// The transcript classifier (Haiku) and its tool_output parameter were
+// removed along with sidebar-agent.ts's tool-result scan pipeline. The
+// combineVerdict tests above retain the transcript_classifier vote-handling
+// coverage — the combiner still accepts those signals even though no live
+// layer produces them.
 
 describe('GSTACK_SECURITY_OFF kill switch', () => {
   test('loadTestsavant honors env var early', () => {

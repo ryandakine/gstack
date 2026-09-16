@@ -13,8 +13,19 @@ import { discoverTemplates, discoverSkillFiles } from './discover-skills';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
+import { ALL_HOST_CONFIGS, getExternalHosts, getHostConfig } from '../hosts/index';
 
 const ROOT = path.resolve(import.meta.dir, '..');
+const ROOT_REALPATH = fs.realpathSync(ROOT);
+const CLAUDE_SKIPS = new Set(getHostConfig('claude').generation.skipSkills ?? []);
+
+function isRepoRootSymlink(candidateDir: string): boolean {
+  try {
+    return fs.realpathSync(candidateDir) === ROOT_REALPATH;
+  } catch {
+    return false;
+  }
+}
 
 // Find all SKILL.md files (dynamic discovery — no hardcoded list)
 const SKILL_FILES = discoverSkillFiles(ROOT);
@@ -57,6 +68,8 @@ console.log('\n  Templates:');
 const TEMPLATES = discoverTemplates(ROOT);
 
 for (const { tmpl, output } of TEMPLATES) {
+  // Source-root outputs are Claude Code renders; own-harness wrappers are absent.
+  if ((getHostConfig('claude').generation.skipSkills ?? []).includes(path.basename(path.dirname(tmpl)))) continue;
   const tmplPath = path.join(ROOT, tmpl);
   const outPath = path.join(ROOT, output);
   if (!fs.existsSync(tmplPath)) {
@@ -64,6 +77,11 @@ for (const { tmpl, output } of TEMPLATES) {
     continue;
   }
   if (!fs.existsSync(outPath)) {
+    const skillDir = output === 'SKILL.md' ? '' : output.split('/')[0];
+    if (CLAUDE_SKIPS.has(skillDir)) {
+      console.log(`  -  ${output.padEnd(30)} — intentionally omitted for Claude Code`);
+      continue;
+    }
     hasErrors = true;
     console.log(`  \u274c ${output.padEnd(30)} — generated file missing! Run: bun run gen:skill-docs`);
     continue;
@@ -81,8 +99,6 @@ for (const file of SKILL_FILES) {
 
 // ─── External Host Skills (config-driven) ───────────────────
 
-import { getExternalHosts } from '../hosts/index';
-
 for (const hostConfig of getExternalHosts()) {
   const hostDir = path.join(ROOT, hostConfig.hostSubdir, 'skills');
   if (fs.existsSync(hostDir)) {
@@ -91,7 +107,12 @@ for (const hostConfig of getExternalHosts()) {
     let count = 0;
     let missing = 0;
     for (const dir of dirs) {
-      const skillMd = path.join(hostDir, dir, 'SKILL.md');
+      const skillDir = path.join(hostDir, dir);
+      if (isRepoRootSymlink(skillDir)) {
+        console.log(`  -  ${dir.padEnd(30)} — sidecar symlink, skipped`);
+        continue;
+      }
+      const skillMd = path.join(skillDir, 'SKILL.md');
       if (fs.existsSync(skillMd)) {
         count++;
         const content = fs.readFileSync(skillMd, 'utf-8');
@@ -115,8 +136,6 @@ for (const hostConfig of getExternalHosts()) {
 }
 
 // ─── Freshness (config-driven) ──────────────────────────────
-
-import { ALL_HOST_CONFIGS } from '../hosts/index';
 
 for (const hostConfig of ALL_HOST_CONFIGS) {
   const hostFlag = hostConfig.name === 'claude' ? '' : ` --host ${hostConfig.name}`;

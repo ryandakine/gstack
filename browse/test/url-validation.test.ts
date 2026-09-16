@@ -47,6 +47,28 @@ describe('validateNavigationUrl', () => {
     await expect(validateNavigationUrl('file://host.example.com/foo.html')).rejects.toThrow(/Unsupported file URL host/i);
   });
 
+  // The daemon opens its own first tab on about:blank, so blocking it meant a restarted
+  // daemon could never initialise — and `make-pdf setup`, whose Chromium smoke test is
+  // `browse newtab about:blank`, reported "Chromium failed to launch" on a healthy browser.
+  it('allows about:blank — the daemon opens its own first tab there', async () => {
+    await expect(validateNavigationUrl('about:blank')).resolves.toBe('about:blank');
+  });
+
+  it('allows about:blank regardless of case, since URL parsing normalises it', async () => {
+    await expect(validateNavigationUrl('ABOUT:BLANK')).resolves.toBe('about:blank');
+  });
+
+  // The allowance is about:blank EXACTLY, not the about: scheme. about:blank has no
+  // origin and loads nothing; the rest of the scheme is a real surface.
+  it('still blocks other about: URLs', async () => {
+    await expect(validateNavigationUrl('about:config')).rejects.toThrow(/scheme.*not allowed/i);
+    await expect(validateNavigationUrl('about:net-internals')).rejects.toThrow(/scheme.*not allowed/i);
+  });
+
+  it('blocks about:blankfoo — exact match, never a prefix test', async () => {
+    await expect(validateNavigationUrl('about:blankfoo')).rejects.toThrow(/scheme.*not allowed/i);
+  });
+
   it('blocks javascript: scheme', async () => {
     await expect(validateNavigationUrl('javascript:alert(1)')).rejects.toThrow(/scheme.*not allowed/i);
   });
@@ -97,6 +119,10 @@ describe('validateNavigationUrl', () => {
 
   it('blocks IPv6 ULA fc00:: (full fc00::/7 range)', async () => {
     await expect(validateNavigationUrl('http://[fc00::]/')).rejects.toThrow(/cloud metadata/i);
+  });
+
+  it('blocks direct IPv6 link-local addresses', async () => {
+    await expect(validateNavigationUrl('http://[fe80::2]/')).rejects.toThrow(/cloud metadata/i);
   });
 
   it('does not block hostnames starting with fd (e.g. fd.example.com)', async () => {
@@ -219,5 +245,79 @@ describe('validateNavigationUrl — file:// URL-encoding', () => {
     await expect(
       validateNavigationUrl('file:///tmp/safe%2F..%2Fetc/passwd')
     ).rejects.toThrow(/encoded \/|Path must be within/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// download + scrape must gate page.request.fetch through validateNavigationUrl
+//
+// Regression: the `goto` command was correctly wired through
+// validateNavigationUrl, but the `download` and `scrape` commands
+// called page.request.fetch(url, ...) directly. A caller with the
+// default write scope could hit the /command endpoint and ask the
+// daemon to fetch http://169.254.169.254/latest/meta-data/ (AWS
+// IMDSv1) or the GCP/Azure/internal equivalents; the body comes back
+// as base64 or lands on disk where GET /file serves it.
+//
+// Source-level check: both page.request.fetch call sites must have a
+// validateNavigationUrl invocation immediately before them.
+// ---------------------------------------------------------------------------
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
+describe('download + scrape SSRF gate', () => {
+  const WRITE_COMMANDS_SRC = readFileSync(
+    join(import.meta.dir, '..', 'src', 'write-commands.ts'),
+    'utf-8',
+  );
+
+  function callsitesOf(needle: string): number[] {
+    const idxs: number[] = [];
+    let at = 0;
+    while ((at = WRITE_COMMANDS_SRC.indexOf(needle, at)) !== -1) {
+      idxs.push(at);
+      at += needle.length;
+    }
+    return idxs;
+  }
+
+  it('every page.request.fetch sits under a preceding validateNavigationUrl', () => {
+    // Match the actual call site (`await page.request.fetch(`), not the
+    // token when it appears inside a code comment.
+    const fetches = callsitesOf('await page.request.fetch(');
+    expect(fetches.length).toBeGreaterThan(0);
+    for (const idx of fetches) {
+      // Look at the 400 chars preceding the call — the gate must live
+      // within the same branch / try block. 400 covers the comment +
+      // await invocation without letting an unrelated upstream gate
+      // pass as evidence.
+      const lead = WRITE_COMMANDS_SRC.slice(Math.max(0, idx - 400), idx);
+      expect(lead).toMatch(/validateNavigationUrl\s*\(/);
+    }
+  });
+
+  it('download command validates the URL before fetch', () => {
+    const block = WRITE_COMMANDS_SRC.slice(
+      WRITE_COMMANDS_SRC.indexOf("case 'download'"),
+      WRITE_COMMANDS_SRC.indexOf("case 'scrape'"),
+    );
+    const vIdx = block.indexOf('validateNavigationUrl');
+    const fIdx = block.indexOf('await page.request.fetch(');
+    expect(vIdx).toBeGreaterThan(-1);
+    expect(fIdx).toBeGreaterThan(-1);
+    expect(vIdx).toBeLessThan(fIdx);
+  });
+
+  it('scrape command validates each URL before fetch in the loop', () => {
+    const block = WRITE_COMMANDS_SRC.slice(
+      WRITE_COMMANDS_SRC.indexOf("case 'scrape'"),
+    );
+    // find the first actual `await page.request.fetch(` call site in scrape
+    // and the nearest preceding validateNavigationUrl
+    const fIdx = block.indexOf('await page.request.fetch(');
+    expect(fIdx).toBeGreaterThan(-1);
+    const preFetch = block.slice(0, fIdx);
+    const vIdx = preFetch.lastIndexOf('validateNavigationUrl');
+    expect(vIdx).toBeGreaterThan(-1);
   });
 });

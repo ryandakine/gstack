@@ -526,6 +526,7 @@ async function dpapiDecrypt(encryptedBytes: Buffer): Promise<Buffer> {
   ].join('; ');
 
   const proc = Bun.spawn(['powershell', '-NoProfile', '-Command', script], {
+    windowsHide: true,
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -563,7 +564,7 @@ async function getMacKeychainPassword(service: string): Promise<string> {
   // macOS may show an Allow/Deny dialog that blocks until the user responds.
   const proc = Bun.spawn(
     ['security', 'find-generic-password', '-s', service, '-w'],
-    { stdout: 'pipe', stderr: 'pipe' },
+    { stdout: 'pipe', stderr: 'pipe', windowsHide: true },
   );
 
   const timeout = new Promise<never>((_, reject) =>
@@ -638,7 +639,7 @@ async function getLinuxSecretPassword(browser: BrowserInfo): Promise<string | nu
 
 async function runPasswordLookup(cmd: string[], timeoutMs: number): Promise<string | null> {
   try {
-    const proc = Bun.spawn(cmd, { stdout: 'pipe', stderr: 'pipe' });
+    const proc = Bun.spawn(cmd, { stdout: 'pipe', stderr: 'pipe', windowsHide: true });
     const timeout = new Promise<never>((_, reject) =>
       setTimeout(() => {
         proc.kill();
@@ -778,7 +779,7 @@ function isBrowserRunning(browserName: string): Promise<boolean> {
   const exe = browserName.toLowerCase().includes('edge') ? 'msedge.exe' : 'chrome.exe';
   return new Promise((resolve) => {
     const proc = Bun.spawn(['tasklist', '/FI', `IMAGENAME eq ${exe}`, '/NH'], {
-      stdout: 'pipe', stderr: 'pipe',
+      stdout: 'pipe', stderr: 'pipe', windowsHide: true,
     });
     proc.exited.then(async () => {
       const out = await new Response(proc.stdout).text();
@@ -831,14 +832,27 @@ export async function importCookiesViaCdp(
   // Launch Chrome headless with remote debugging on the real profile.
   //
   // Security posture of the debug port:
-  //   - Chrome binds --remote-debugging-port to 127.0.0.1 by default. We rely
-  //     on that — the port is NOT exposed to the network. Any local process
-  //     running as the same user could connect and read cookies, but if an
-  //     attacker already has local-user access they can read the cookie DB
-  //     directly. Threat model: no worse than baseline.
+  //   - Chrome binds --remote-debugging-port to 127.0.0.1 by default. The
+  //     port is NOT exposed to the network. Baseline threat: a local
+  //     process running as the same user can connect.
   //   - Port is randomized in [9222, 9321] to avoid collisions with other
-  //     Chrome-based tools the user may have open. Not cryptographic.
+  //     Chrome-based tools. Not cryptographic — security relies on
+  //     same-user-access baseline, not port secrecy.
   //   - Chrome is always killed in the finally block below (even on crash).
+  //
+  // KNOWN NON-GOAL (tracked as a separate hardening task for the next
+  // security wave):
+  //   On Windows 10.15+ with App-Bound Encryption (v20) enabled, a
+  //   same-user process that opens the cookie DB directly cannot decrypt
+  //   v20 values — the DPAPI context is bound to the browser process.
+  //   The CDP port bypasses that: `Network.getAllCookies` runs inside the
+  //   browser, so any same-user process that connects to the debug port
+  //   before we kill Chrome could exfiltrate decrypted v20 cookies.
+  //   Fix direction: switch to `--remote-debugging-pipe` so the CDP
+  //   transport is a parent/child stdio pipe, not TCP. Requires
+  //   restructuring the extractCookiesViaCdp WebSocket client; deferred
+  //   to a follow-up because the transport swap is non-trivial and the
+  //   baseline threat is still "attacker already has same-user access."
   //
   // Debugging note: if this path starts failing after a Chrome update,
   // check the Chrome version logged below — Chrome's ABE key format (v20)
@@ -856,7 +870,7 @@ export async function importCookiesViaCdp(
     '--disable-extensions',
     '--disable-sync',
     '--no-default-browser-check',
-  ], { stdout: 'pipe', stderr: 'pipe' });
+  ], { stdout: 'pipe', stderr: 'pipe', windowsHide: true });
 
   // Wait for Chrome to start, then find a page target's WebSocket URL.
   // Network.getAllCookies is only available on page targets, not browser.

@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { JUDGE_MS } from './helpers/eval-budgets';
 import { runSkillTest } from './helpers/session-runner';
 import {
   ROOT, browseBin, runId, evalsEnabled,
@@ -47,7 +48,7 @@ describeIfSelected('Skill E2E tests', [
 Report the results of each command.`,
       workingDirectory: tmpDir,
       maxTurns: 7,
-      timeout: 60_000,
+      timeout: JUDGE_MS,
       testName: 'browse-basic',
       runId,
     });
@@ -56,7 +57,7 @@ Report the results of each command.`,
     recordE2E(evalCollector, 'browse basic commands', 'Skill E2E tests', result);
     expect(result.browseErrors).toHaveLength(0);
     expect(result.exitReason).toBe('success');
-  }, 90_000);
+  }, JUDGE_MS);
 
   testConcurrentIfSelected('browse-snapshot', async () => {
     const result = await runSkillTest({
@@ -69,7 +70,7 @@ Report the results of each command.`,
 Report what each command returned.`,
       workingDirectory: tmpDir,
       maxTurns: 9,
-      timeout: 60_000,
+      timeout: JUDGE_MS,
       testName: 'browse-snapshot',
       runId,
     });
@@ -81,12 +82,18 @@ Report what each command returned.`,
       console.warn('Browse errors (non-fatal):', result.browseErrors);
     }
     expect(result.exitReason).toBe('success');
-  }, 90_000);
+  }, JUDGE_MS);
 
   testConcurrentIfSelected('skillmd-setup-discovery', async () => {
-    const skillMd = fs.readFileSync(path.join(ROOT, 'SKILL.md'), 'utf-8');
-    const setupStart = skillMd.indexOf('## SETUP');
-    const setupEnd = skillMd.indexOf('## IMPORTANT');
+    // P2 (v1.2.0): the browse SETUP/binary-discovery block moved from the root
+    // router to browse/SKILL.md; the `$B` block now sits under "Browser fallback".
+    const skillMd = fs.readFileSync(path.join(ROOT, 'browse', 'SKILL.md'), 'utf-8');
+    // The `$B` setup lives in the Browser fallback section since Aside became
+    // the primary driver: slice from its heading to the next heading.
+    const setupStart = skillMd.indexOf('### Find the `$B` binary');
+    const nextH3 = skillMd.indexOf('\n### ', setupStart + 1);
+    const nextH2 = skillMd.indexOf('\n## ', setupStart + 1);
+    const setupEnd = [nextH3, nextH2].filter((i) => i > setupStart).sort((a, b) => a - b)[0] ?? skillMd.length;
     const setupBlock = skillMd.slice(setupStart, setupEnd);
 
     // Guard: verify we extracted a valid setup block
@@ -102,7 +109,7 @@ Then run: $B text
 Report whether it worked.`,
       workingDirectory: tmpDir,
       maxTurns: 10,
-      timeout: 60_000,
+      timeout: JUDGE_MS,
       testName: 'skillmd-setup-discovery',
       runId,
     });
@@ -110,15 +117,21 @@ Report whether it worked.`,
     recordE2E(evalCollector, 'SKILL.md setup block discovery', 'Skill E2E tests', result);
     expect(result.browseErrors).toHaveLength(0);
     expect(result.exitReason).toBe('success');
-  }, 90_000);
+  }, JUDGE_MS);
 
   testConcurrentIfSelected('skillmd-no-local-binary', async () => {
     // Create a tmpdir with no browse binary — no local .claude/skills/gstack/browse/dist/browse
     const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-e2e-empty-'));
 
-    const skillMd = fs.readFileSync(path.join(ROOT, 'SKILL.md'), 'utf-8');
-    const setupStart = skillMd.indexOf('## SETUP');
-    const setupEnd = skillMd.indexOf('## IMPORTANT');
+    // P2 (v1.2.0): the browse SETUP/binary-discovery block moved from the root
+    // router to browse/SKILL.md; the `$B` block now sits under "Browser fallback".
+    const skillMd = fs.readFileSync(path.join(ROOT, 'browse', 'SKILL.md'), 'utf-8');
+    // The `$B` setup lives in the Browser fallback section since Aside became
+    // the primary driver: slice from its heading to the next heading.
+    const setupStart = skillMd.indexOf('### Find the `$B` binary');
+    const nextH3 = skillMd.indexOf('\n### ', setupStart + 1);
+    const nextH2 = skillMd.indexOf('\n## ', setupStart + 1);
+    const setupEnd = [nextH3, nextH2].filter((i) => i > setupStart).sort((a, b) => a - b)[0] ?? skillMd.length;
     const setupBlock = skillMd.slice(setupStart, setupEnd);
 
     const result = await runSkillTest({
@@ -145,15 +158,21 @@ Report the exact output. Do NOT try to fix or install anything — just report w
 
     // Clean up
     try { fs.rmSync(emptyDir, { recursive: true, force: true }); } catch {}
-  }, 60_000);
+  }, JUDGE_MS);
 
   testConcurrentIfSelected('skillmd-outside-git', async () => {
     // Create a tmpdir outside any git repo
     const nonGitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-e2e-nogit-'));
 
-    const skillMd = fs.readFileSync(path.join(ROOT, 'SKILL.md'), 'utf-8');
-    const setupStart = skillMd.indexOf('## SETUP');
-    const setupEnd = skillMd.indexOf('## IMPORTANT');
+    // P2 (v1.2.0): the browse SETUP/binary-discovery block moved from the root
+    // router to browse/SKILL.md; the `$B` block now sits under "Browser fallback".
+    const skillMd = fs.readFileSync(path.join(ROOT, 'browse', 'SKILL.md'), 'utf-8');
+    // The `$B` setup lives in the Browser fallback section since Aside became
+    // the primary driver: slice from its heading to the next heading.
+    const setupStart = skillMd.indexOf('### Find the `$B` binary');
+    const nextH3 = skillMd.indexOf('\n### ', setupStart + 1);
+    const nextH2 = skillMd.indexOf('\n## ', setupStart + 1);
+    const setupEnd = [nextH3, nextH2].filter((i) => i > setupStart).sort((a, b) => a - b)[0] ?? skillMd.length;
     const setupBlock = skillMd.slice(setupStart, setupEnd);
 
     const result = await runSkillTest({
@@ -176,7 +195,7 @@ Report the exact output — either "READY: <path>" or "NEEDS_SETUP".`,
 
     // Clean up
     try { fs.rmSync(nonGitDir, { recursive: true, force: true }); } catch {}
-  }, 60_000);
+  }, JUDGE_MS);
 
   testConcurrentIfSelected('operational-learning', async () => {
     const opDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-e2e-oplearn-'));
@@ -192,13 +211,25 @@ Report the exact output — either "READY: <path>" or "NEEDS_SETUP".`,
     run('git', ['add', '.']);
     run('git', ['commit', '-m', 'initial']);
 
-    // Copy bin scripts
+    // Copy bin scripts + the lib module they import. gstack-learnings-log
+    // does `import ... from '$SCRIPT_DIR/../lib/jsonl-store.ts'` (v1.57.5.0
+    // injection sanitization) — without lib/ alongside bin/, the script exits
+    // 1 before writing anything, failing this test for a fixture reason, not
+    // a model-behavior reason (root-caused during the v1.58.0.0 ship; fails
+    // identically on main).
     const binDir = path.join(opDir, 'bin');
     fs.mkdirSync(binDir, { recursive: true });
     for (const script of ['gstack-learnings-log', 'gstack-slug']) {
       fs.copyFileSync(path.join(ROOT, 'bin', script), path.join(binDir, script));
       fs.chmodSync(path.join(binDir, script), 0o755);
     }
+    // gstack-learnings-log imports $SCRIPT_DIR/../lib/jsonl-store.ts (shared
+    // injection patterns, since v1.57.5.0) — a real install always ships bin/
+    // and lib/ together, so the fixture must too. Without it the bin exits 1
+    // before writing anything and the test fails on every attempt.
+    const libDir = path.join(opDir, 'lib');
+    fs.mkdirSync(libDir, { recursive: true });
+    fs.copyFileSync(path.join(ROOT, 'lib', 'jsonl-store.ts'), path.join(libDir, 'jsonl-store.ts'));
 
     // gstack-learnings-log will create the project dir automatically via gstack-slug
 
@@ -268,7 +299,7 @@ Log the operational learning now. Then say what you logged.`,
 
     // Clean up
     try { fs.rmSync(opDir, { recursive: true, force: true }); } catch {}
-  }, 90_000);
+  }, JUDGE_MS);
 
   testConcurrentIfSelected('session-awareness', async () => {
     const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-e2e-session-'));
@@ -286,11 +317,38 @@ Log the operational learning now. Then say what you logged.`,
     // Add a remote so the agent can derive a project name
     run('git', ['remote', 'add', 'origin', 'https://github.com/acme/billing-app.git']);
 
-    // Extract AskUserQuestion format instructions from generated SKILL.md
-    const skillMd = fs.readFileSync(path.join(ROOT, 'SKILL.md'), 'utf-8');
+    // Extract AskUserQuestion format instructions from a generated SKILL.md.
+    // ROOT/SKILL.md is the browse skill (Tier 1) and does NOT contain the
+    // "## AskUserQuestion Format" section — that block is only emitted for
+    // Tier 2+ skills by scripts/resolvers/preamble.ts. Use office-hours/SKILL.md
+    // (Tier 3) which always has the format guidance baked in. Falls back to
+    // the first SKILL.md that contains the header so a future template move
+    // doesn't break this test again.
+    let skillMdPath = path.join(ROOT, 'office-hours', 'SKILL.md');
+    let skillMd = '';
+    if (fs.existsSync(skillMdPath)) {
+      skillMd = fs.readFileSync(skillMdPath, 'utf-8');
+    }
+    if (!skillMd.includes('## AskUserQuestion Format')) {
+      // Fallback: scan top-level skill dirs for the first match.
+      const skillDirs = fs.readdirSync(ROOT, { withFileTypes: true })
+        .filter(d => d.isDirectory())
+        .map(d => path.join(ROOT, d.name, 'SKILL.md'));
+      for (const candidate of skillDirs) {
+        if (!fs.existsSync(candidate)) continue;
+        const content = fs.readFileSync(candidate, 'utf-8');
+        if (content.includes('## AskUserQuestion Format')) {
+          skillMd = content;
+          skillMdPath = candidate;
+          break;
+        }
+      }
+    }
     const aqStart = skillMd.indexOf('## AskUserQuestion Format');
     const aqEnd = skillMd.indexOf('\n## ', aqStart + 1);
-    const aqBlock = skillMd.slice(aqStart, aqEnd > 0 ? aqEnd : undefined);
+    const aqBlock = aqStart >= 0
+      ? skillMd.slice(aqStart, aqEnd > 0 ? aqEnd : undefined)
+      : '';
 
     const outputPath = path.join(sessionDir, 'question-output.md');
 
@@ -308,7 +366,7 @@ Since this is non-interactive, DO NOT actually call AskUserQuestion. Instead, wr
 Remember: _SESSIONS=4, so ELI16 mode is active. The user is juggling multiple windows and may not remember what this conversation is about. Re-ground them.`,
       workingDirectory: sessionDir,
       maxTurns: 8,
-      timeout: 60_000,
+      timeout: JUDGE_MS,
       testName: 'session-awareness',
       runId,
     });
@@ -349,7 +407,7 @@ Remember: _SESSIONS=4, so ELI16 mode is active. The user is juggling multiple wi
 
     // Clean up
     try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
-  }, 90_000);
+  }, JUDGE_MS);
 });
 
 // Module-level afterAll — finalize eval collector after all tests complete
