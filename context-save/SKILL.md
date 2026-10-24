@@ -4,7 +4,8 @@ preamble-tier: 2
 version: 1.0.0
 description: |
   Save working context. Captures git state, decisions made, and remaining work
-  so any future session can pick up without losing a beat.
+  so any future session can pick up without losing a beat. Also records the
+  user's standing instructions (nudges) in the ledger and in the saved file.
   Use when asked to "save progress", "save state", "context save", or
   "save my work". Pair with /context-restore to resume later.
   Formerly /checkpoint — renamed because Claude Code treats /checkpoint as a
@@ -886,7 +887,9 @@ fi
    error or traceback instead of `LEDGER_SEARCH_DONE` means the search failed:
    treat it the same way, because duplicates cannot be checked. Skip entries the
    ledger marks `superseded`. A nudge that already appears in the list is NOT
-   re-logged, but it still goes into the saved file with its existing id.
+   re-logged, but it still goes into the saved file with its existing id. If the
+   two lists are identical, the ledger does not know this repo's slug: tag every
+   nudge `project:home` in step 3 and tell the user the repo is unregistered.
 3. Log each NEW nudge as its own decision. The text goes through a quoted
    heredoc, so nothing in it is interpreted by the shell: paste it exactly as the
    user said it, no escaping, one command per nudge. The only thing the text may
@@ -925,7 +928,12 @@ if [ -n "$_ET" ]; then
   IFS=: read -r _A _B _C <<<"$_ET"
   if [ -z "$_C" ]; then _C=$_B; _B=$_A; _A=0; fi
   DURATION=$(( _D*86400 + 10#$_A*3600 + 10#$_B*60 + 10#$_C ))
-  echo "SESSION_DURATION_S=$DURATION"
+  # Under a minute means the parent is a per-command wrapper, not the agent.
+  if [ "$DURATION" -ge 60 ]; then
+    echo "SESSION_DURATION_S=$DURATION"
+  else
+    echo "SESSION_DURATION_S=unknown"
+  fi
 else
   echo "SESSION_DURATION_S=unknown"
 fi
