@@ -33,7 +33,7 @@ pick up exactly where they left off. Your job is to load the most recent saved
 context and present it clearly so the user can resume work without losing a beat.
 
 **HARD GATE:** Do NOT implement code changes. This skill only reads saved
-context files and presents the summary.
+context files and the ledger's recorded nudges, and presents the summary.
 
 **Default: load the most recent saved context across ALL branches.** This is
 intentionally different from `/context-save list`, which defaults to the current
@@ -90,22 +90,41 @@ enables Conductor workspace handoff.
 
 `/context-save` logs the user's standing instructions ("don't do X", "always Y")
 to the ledger under `--tag nudge` and lists them in the saved file. Pull them now,
-before any work resumes, so the restored session obeys them from its first action:
+before any work resumes, so the restored session obeys them from its first action.
+The ledger scopes nudges the same way its own session-start recall does: rules
+tagged `project:home` apply everywhere; rules tagged with a repo slug apply only
+there. Output is newest first.
 
 ```bash
-if command -v ledger >/dev/null 2>&1; then
-  echo "=== NUDGES (ledger, tag=nudge) ==="
-  ledger search --tag nudge 2>/dev/null | tail -40
-else
+{{SLUG_SETUP}}
+if [ -n "${GSTACK_NO_LEDGER:-}" ]; then
   echo "LEDGER_UNAVAILABLE"
+elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [[ "$ANTHROPIC_BASE_URL" != *anthropic.com* ]]; then
+  echo "LEDGER_SUPPRESSED (non-Anthropic backend: nudges stay local)"
+elif ! ledger --help 2>/dev/null | grep -q -- 'merge-incoming'; then
+  echo "LEDGER_UNAVAILABLE"
+else
+  echo "=== NUDGES IN FORCE EVERYWHERE (project:home, newest first) ==="
+  ledger search --tag nudge --kind decision --project home | head -n 100
+  echo "=== NUDGES FOR THIS PROJECT (${SLUG:-home}, newest first) ==="
+  ledger search --tag nudge --kind decision --project "${SLUG:-home}" | head -n 100
+  echo "LEDGER_SEARCH_DONE"
 fi
 ```
+
+Reading the result: skip entries the ledger marks `superseded`. A nudge recorded
+for another project is not in force here. `LEDGER_UNAVAILABLE` or
+`LEDGER_SUPPRESSED` (or an error instead of `LEDGER_SEARCH_DONE`) means the ledger
+could not be consulted: say so in the summary rather than "None recorded", and rely
+on the saved file alone.
 
 In Step 2, also read the `### Nudges` section of the saved file. Merge the two
 sources: the ledger is the durable, cross-session copy; the saved file is the
 per-session copy and may hold nudges the ledger never received (for example when
-the save ran on a machine without `ledger`). Treat every nudge as an instruction
-in force for the rest of the session.
+the save ran on a machine without `ledger`). Every nudge that survives that merge
+is an instruction in force for the rest of the session — with one override: what
+the user says in this session beats any saved nudge, and a rule the user has since
+revoked or replaced is never reactivated from an older saved file.
 
 ### Step 2: Load the right file
 
@@ -137,7 +156,10 @@ Status:      {status}
 
 ### Nudges in force
 {standing instructions: the saved file's `### Nudges` section merged with the
-ledger output from Step 1.5, one line each; "None recorded" if both are empty}
+ledger output from Step 1.5, one line each, superseded and other-project entries
+left out. "None recorded" only when both sources were readable and empty; when the
+ledger was unavailable or suppressed, say "ledger not consulted — saved-file nudges
+only" above the list}
 ```
 
 If the current branch differs from the saved context's branch, note this:
@@ -175,6 +197,7 @@ state, then `/context-restore` will find it."
   `ls -1t` (filesystem mtime). Filenames are stable across file-system
   operations; mtime is not.
 - **Nudges load before work resumes.** Step 1.5 always runs. The user's standing
-  instructions are not optional context; they are rules for the rest of the session.
+  instructions are not optional context; they are rules for the rest of the session,
+  except where the user's current instructions override them.
 - **This is a gstack skill, not a Claude Code built-in.** When the user types
   `/context-restore`, invoke this skill via the Skill tool.
