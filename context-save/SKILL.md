@@ -842,6 +842,45 @@ Using the gathered state plus your conversation history, produce a summary cover
 If the user provided a title, use it. Otherwise, infer a concise title (3-6 words)
 from the work being done.
 
+### Step 2.5: Capture nudges — the user's standing instructions
+
+A nudge is a durable rule the user gave about HOW to work, not a one-off task:
+"don't do X", "always Y", "use Z for this", "never suggest W", "stop doing V",
+"from now on ...", and corrections after a mistake ("no, do it this way"). They
+live only in chat, so they are the first thing lost at compaction or in a fresh
+session. Every save captures them.
+
+1. Re-read the whole conversation, including anything summarized by an earlier
+   compaction, and list every nudge the user stated. Quote the user's own words
+   as closely as possible and keep the reason when they gave one. Skip task
+   requests ("add a button", "fix the test") — those belong in Remaining Work.
+2. Check what is already recorded, so repeated saves do not log duplicates:
+
+```bash
+if command -v ledger >/dev/null 2>&1; then
+  echo "=== NUDGES ALREADY IN THE LEDGER (tag=nudge) ==="
+  ledger search --tag nudge 2>/dev/null | tail -40
+else
+  echo "LEDGER_UNAVAILABLE"
+fi
+```
+
+   Drop any nudge whose meaning is already in that list.
+3. If `ledger` is available, log each NEW nudge as its own decision. Use the
+   ledger's project slug for this work (`ledger projects` lists them; fall back
+   to the gstack `$SLUG` from Step 1). One command per nudge; put the text in
+   single quotes and write any single quote inside it as `'\''`:
+
+```bash
+ledger add --kind decision --tag nudge --tag project:<project-slug> '<the instruction, with its reason if the user gave one>'
+```
+
+   Keep the id each command prints — it goes next to the nudge in the saved file.
+4. If `LEDGER_UNAVAILABLE` was printed, the nudges still go into the saved file
+   under their own heading (Step 4). Nothing is lost; it is just not searchable.
+5. If the conversation contains no nudges, the saved file still gets the heading
+   with "None this session." so a future reader knows the step ran.
+
 ### Step 3: Compute session duration
 
 Try to determine how long this session has been active:
@@ -930,10 +969,22 @@ files_modified:
 ### Notes
 
 {Gotchas, blocked items, open questions, things tried that didn't work}
+
+### Nudges
+
+{One bullet per standing instruction captured in Step 2.5, in the user's words,
+each prefixed with its ledger id when one was logged, e.g.
+"- 01M5N7EYXJ — No more money on the media stack beyond the existing Usenet sub."
+Write "None this session." if there were none.}
+
+On restore, run `ledger search --tag nudge` first.
 ```
 
 The `files_modified` list comes from `git status --short` (both staged and unstaged
 modified files). Use relative paths from the repo root.
+
+The `### Nudges` section and its closing "On restore" line are always written, even
+when the list is empty — `/context-restore` looks for them.
 
 After writing, confirm to the user:
 
@@ -945,6 +996,7 @@ Branch:   {branch}
 File:     {path to saved file}
 Modified: {N} files
 Duration: {duration or "unknown"}
+Nudges:   {N new logged to the ledger (tag=nudge), M already recorded, or "none this session"}
 ════════════════════════════════════════
 
 Restore later with /context-restore.
@@ -952,106 +1004,6 @@ Restore later with /context-restore.
 
 ---
 
-<<<<<<< HEAD:checkpoint/SKILL.md.tmpl
-## Resume flow
-
-### Step 1: Find checkpoints
-
-```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG
-CHECKPOINT_DIR="$HOME/.gstack/projects/$SLUG/checkpoints"
-if [ -d "$CHECKPOINT_DIR" ]; then
-  find "$CHECKPOINT_DIR" -maxdepth 1 -name "*.md" -type f 2>/dev/null | xargs ls -1t 2>/dev/null | head -20
-else
-  echo "NO_CHECKPOINTS"
-fi
-```
-
-List checkpoints from **all branches** (checkpoint files contain the branch name
-in their frontmatter, so all files in the directory are candidates). This enables
-Conductor workspace handoff — a checkpoint saved on one branch can be resumed from
-another.
-
-### Step 1.5: Check for WIP commit context (continuous checkpoint mode)
-
-If `CHECKPOINT_MODE` was `"continuous"` during prior work, the branch may have
-`WIP:` commits with structured `[gstack-context]` blocks in their bodies. These
-are a second recovery trail alongside the markdown checkpoint files.
-
-```bash
-_BRANCH=$(git branch --show-current 2>/dev/null)
-# Detect if this branch has any WIP commits against the nearest remote ancestor
-_BASE=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD origin/master 2>/dev/null)
-if [ -n "$_BASE" ]; then
-  WIP_COMMITS=$(git log "$_BASE"..HEAD --grep="^WIP:" --format="%H" 2>/dev/null | head -20)
-  if [ -n "$WIP_COMMITS" ]; then
-    echo "WIP_COMMITS_FOUND"
-    # Extract [gstack-context] blocks from each WIP commit body
-    for SHA in $WIP_COMMITS; do
-      echo "--- commit $SHA ---"
-      git log -1 "$SHA" --format="%s%n%n%b" 2>/dev/null | \
-        awk '/\[gstack-context\]/,/\[\/gstack-context\]/ { print }'
-    done
-  else
-    echo "NO_WIP_COMMITS"
-  fi
-fi
-```
-
-If `WIP_COMMITS_FOUND`: Read the extracted `[gstack-context]` blocks. Each block
-represents a logical unit of prior work with Decisions/Remaining/Tried/Skill.
-Merge these with the markdown checkpoint file to reconstruct session state. The
-git history shows the chronological arc; the markdown checkpoint shows the
-intentional save points. Both matter.
-
-**Important:** Do NOT delete WIP commits during resume. They remain the recovery
-trail until /ship squashes them into clean commits during PR creation.
-
-### Step 2: Load checkpoint
-
-If the user specified a checkpoint (by number, title fragment, or date), find the
-matching file. Otherwise, load the **most recent** checkpoint.
-
-Read the checkpoint file and present a summary:
-
-```
-RESUMING CHECKPOINT
-════════════════════════════════════════
-Title:       {title}
-Branch:      {branch from checkpoint}
-Saved:       {timestamp, human-readable}
-Duration:    Last session was {formatted duration} (if available)
-Status:      {status}
-════════════════════════════════════════
-
-### Summary
-{summary from checkpoint}
-
-### Remaining Work
-{remaining work items from checkpoint}
-
-### Notes
-{notes from checkpoint}
-```
-
-If the current branch differs from the checkpoint's branch, note this:
-"This checkpoint was saved on branch `{branch}`. You are currently on
-`{current branch}`. You may want to switch branches before continuing."
-
-### Step 3: Offer next steps
-
-After presenting the checkpoint, ask via AskUserQuestion:
-
-- A) Continue working on the remaining items
-- B) Show the full checkpoint file
-- C) Just needed the context, thanks
-
-If A, summarize the first remaining work item and suggest starting there.
-
----
-
-=======
->>>>>>> origin/main:context-save/SKILL.md.tmpl
 ## List flow
 
 ### Step 1: Gather saved contexts
@@ -1120,6 +1072,9 @@ If there are no saved contexts, tell the user: "No saved contexts yet. Run
   save creates a new file.
 - **Infer, don't interrogate.** Use git state and conversation context to fill in
   the file. Only use AskUserQuestion if the title genuinely cannot be inferred.
+- **Nudges are part of every save.** Step 2.5 is not optional. A standing
+  instruction that exists only in chat dies at the next compaction; the ledger
+  entry (`--tag nudge`) and the `### Nudges` section are its two copies.
 - **This is a gstack skill, not a Claude Code built-in.** When the user types
   `/context-save`, invoke this skill via the Skill tool. The old `/checkpoint`
   name collided with Claude Code's native `/rewind` alias — the rename fixed that.

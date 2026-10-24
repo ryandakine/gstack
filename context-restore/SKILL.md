@@ -840,6 +840,27 @@ fi
 (the branch is recorded in frontmatter, not used for filtering here). This
 enables Conductor workspace handoff.
 
+### Step 1.5: Reload the user's standing instructions (nudges)
+
+`/context-save` logs the user's standing instructions ("don't do X", "always Y")
+to the ledger under `--tag nudge` and lists them in the saved file. Pull them now,
+before any work resumes, so the restored session obeys them from its first action:
+
+```bash
+if command -v ledger >/dev/null 2>&1; then
+  echo "=== NUDGES (ledger, tag=nudge) ==="
+  ledger search --tag nudge 2>/dev/null | tail -40
+else
+  echo "LEDGER_UNAVAILABLE"
+fi
+```
+
+In Step 2, also read the `### Nudges` section of the saved file. Merge the two
+sources: the ledger is the durable, cross-session copy; the saved file is the
+per-session copy and may hold nudges the ledger never received (for example when
+the save ran on a machine without `ledger`). Treat every nudge as an instruction
+in force for the rest of the session.
+
 ### Step 2: Load the right file
 
 - If the user specified a title fragment or number: find the matching file among
@@ -867,6 +888,10 @@ Status:      {status}
 
 ### Notes
 {notes}
+
+### Nudges in force
+{standing instructions: the saved file's `### Nudges` section merged with the
+ledger output from Step 1.5, one line each; "None recorded" if both are empty}
 ```
 
 If the current branch differs from the saved context's branch, note this:
@@ -903,5 +928,7 @@ state, then `/context-restore` will find it."
 - **"Most recent" means the filename `YYYYMMDD-HHMMSS` prefix**, not
   `ls -1t` (filesystem mtime). Filenames are stable across file-system
   operations; mtime is not.
+- **Nudges load before work resumes.** Step 1.5 always runs. The user's standing
+  instructions are not optional context; they are rules for the rest of the session.
 - **This is a gstack skill, not a Claude Code built-in.** When the user types
   `/context-restore`, invoke this skill via the Skill tool.
