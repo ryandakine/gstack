@@ -399,6 +399,9 @@ describe('context-save/restore: nudge capture', () => {
     expect(save).toContain('On restore, run `ledger search --tag nudge` first.');
     expect(restore).toContain('### Nudges in force');
     expect(restore).toContain('Step 1.5');
+    // WIP-commit recovery lives in restore now (its old copy sat inside a dead conflict block in save).
+    expect(restore).toContain('Step 1.6');
+    expect(restore).toContain("--grep='^WIP:'");
     // ledger search is newest-first; piping it to tail keeps the OLDEST rows.
     expect(save).not.toMatch(/ledger search[^\n]*\|\s*tail/);
     expect(restore).not.toMatch(/ledger search[^\n]*\|\s*tail/);

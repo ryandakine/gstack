@@ -5,7 +5,8 @@ version: 1.0.0
 description: |
   Restore working context saved earlier by /context-save. Loads the most recent
   saved state (across all branches by default) so you can pick up where you
-  left off — even across Conductor workspace handoffs.
+  left off — even across Conductor workspace handoffs. Reloads the user's
+  standing instructions (nudges) from the ledger before work resumes.
   Use when asked to "resume", "restore context", "where was I", or
   "pick up where I left off". Pair with /context-save.
   Formerly /checkpoint resume — renamed because Claude Code treats /checkpoint
@@ -119,12 +120,40 @@ could not be consulted: say so in the summary rather than "None recorded", and r
 on the saved file alone.
 
 In Step 2, also read the `### Nudges` section of the saved file. Merge the two
-sources: the ledger is the durable, cross-session copy; the saved file is the
-per-session copy and may hold nudges the ledger never received (for example when
-the save ran on a machine without `ledger`). Every nudge that survives that merge
-is an instruction in force for the rest of the session — with one override: what
-the user says in this session beats any saved nudge, and a rule the user has since
-revoked or replaced is never reactivated from an older saved file.
+sources, deduplicating by ledger id (a logged nudge appears in both): the ledger is
+the durable, cross-session copy; the saved file is the per-session copy and may
+hold nudges the ledger never received (for example when the save ran on a machine
+without `ledger`). Every nudge that survives that merge is an instruction in force
+for the rest of the session — with one override: what the user says in this
+session beats any saved nudge, and a rule the user has since revoked or replaced
+is never reactivated from an older saved file.
+
+### Step 1.6: Check for WIP commit context (continuous checkpoint mode)
+
+If `CHECKPOINT_MODE` was `"continuous"` during prior work, the branch may carry
+`WIP:` commits whose bodies hold `[gstack-context]` blocks (Decisions / Remaining /
+Tried / Skill). They are a second recovery trail beside the saved files. Only the
+current branch's recent history is read; no base branch is assumed.
+
+```bash
+WIP_COMMITS=$(git log HEAD --grep='^WIP:' --since='30 days ago' --format='%H' -n 20 2>/dev/null)
+if [ -n "$WIP_COMMITS" ]; then
+  echo "WIP_COMMITS_FOUND"
+  for SHA in $WIP_COMMITS; do
+    echo "--- commit $SHA ---"
+    git log -1 "$SHA" --format='%s%n%n%b' 2>/dev/null | \
+      awk '/\[gstack-context\]/,/\[\/gstack-context\]/ { print }'
+  done
+else
+  echo "NO_WIP_COMMITS"
+fi
+```
+
+If `WIP_COMMITS_FOUND`: read the extracted blocks and merge them with the saved
+file in Step 2. The git history shows the chronological arc; the saved file shows
+the intentional save points. Both matter. Do NOT delete WIP commits during
+restore; they remain the recovery trail until `/ship` squashes them into clean
+commits during PR creation.
 
 ### Step 2: Load the right file
 
@@ -184,6 +213,9 @@ If Step 1 printed `NO_CHECKPOINTS`, tell the user:
 
 "No saved contexts yet. Run `/context-save` first to save your current working
 state, then `/context-restore` will find it."
+
+Still run Step 1.5 and show the ledger's nudges in force: the user's standing
+instructions apply even when there is no saved file to restore.
 
 ---
 
