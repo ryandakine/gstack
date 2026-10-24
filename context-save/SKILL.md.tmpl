@@ -162,14 +162,15 @@ NUDGE
 Try to determine how long this session has been active:
 
 ```bash
-if [ -n "$_TEL_START" ]; then
-  START_EPOCH="$_TEL_START"
-elif [ -n "$PPID" ]; then
-  START_EPOCH=$(ps -o lstart= -p $PPID 2>/dev/null | xargs -I{} date -jf "%c" "{}" "+%s" 2>/dev/null || echo "")
-fi
-if [ -n "$START_EPOCH" ]; then
-  NOW=$(date +%s)
-  DURATION=$((NOW - START_EPOCH))
+# Elapsed time of the parent (the agent process), from ps etime, which is
+# [[dd-]hh:]mm:ss on both Linux and macOS. (_TEL_START lives only in the
+# preamble's own shell, and BSD-only date -jf never worked on Linux.)
+_ET=$(ps -o etime= -p "$PPID" 2>/dev/null | tr -d ' ')
+if [ -n "$_ET" ]; then
+  _D=0; case "$_ET" in *-*) _D=${_ET%%-*}; _ET=${_ET#*-};; esac
+  IFS=: read -r _A _B _C <<<"$_ET"
+  if [ -z "$_C" ]; then _C=$_B; _B=$_A; _A=0; fi
+  DURATION=$(( _D*86400 + 10#$_A*3600 + 10#$_B*60 + 10#$_C ))
   echo "SESSION_DURATION_S=$DURATION"
 else
   echo "SESSION_DURATION_S=unknown"
@@ -190,7 +191,7 @@ allowlist: only `a-z 0-9 - .` survive.
 CHECKPOINT_DIR="${GSTACK_HOME:-$HOME/.gstack}/projects/$SLUG/checkpoints"
 mkdir -p "$CHECKPOINT_DIR"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-# Bash-side title sanitize. Pass the raw title as $1 when running this block.
+# Bash-side title sanitize. Set TITLE_RAW to the raw title when running this block.
 # Example: TITLE_RAW="wintermute progress" bash -c '...'
 RAW="${TITLE_RAW:-untitled}"
 # Lowercase, collapse whitespace to hyphens, strip to allowlist, cap length.
