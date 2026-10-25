@@ -458,3 +458,122 @@ describe('context-save session duration (#2704)', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Nudge capture (context-save Step 2.5 / context-restore Step 1.5).
+// The ledger-access block below is the exact block from both templates minus
+// the {{SLUG_SETUP}} line. Kept in sync by hand; if the template changes this
+// out of alignment, these tests fail — intended.
+// ---------------------------------------------------------------------------
+
+const NUDGE_LOAD_BASH = `
+if [ -n "\${GSTACK_NO_LEDGER:-}" ]; then
+  echo "LEDGER_UNAVAILABLE"
+elif [ -n "\${ANTHROPIC_BASE_URL:-}" ] && [[ "$ANTHROPIC_BASE_URL" != *anthropic.com* ]]; then
+  echo "LEDGER_SUPPRESSED (non-Anthropic backend: nudges stay local)"
+elif ! ledger --help 2>/dev/null | grep -q -- 'merge-incoming'; then
+  echo "LEDGER_UNAVAILABLE"
+else
+  echo "=== NUDGES IN FORCE EVERYWHERE (project:home, newest first) ==="
+  ledger search --tag nudge --kind decision --project home | head -n 100
+  echo "=== NUDGES FOR THIS PROJECT (\${SLUG:-home}, newest first) ==="
+  ledger search --tag nudge --kind decision --project "\${SLUG:-home}" | head -n 100
+  echo "LEDGER_SEARCH_DONE"
+fi
+`;
+
+// Writes a stub \`ledger\` into dir: --help advertises merge-incoming (the
+// fingerprint), search prints one fake row, add records argv + stdin verbatim.
+function writeStubLedger(dir: string): void {
+  const stub = `#!/bin/bash
+case "$1" in
+  --help) echo "usage: ledger {add,search,merge-incoming,...}";;
+  search) echo "01STUBID00000000000000000000  2026-01-01 00:00  [decision] stub nudge";;
+  add) printf '%s\\n' "$@" > "$STUB_OUT.args"; cat > "$STUB_OUT.stdin"; echo "01STUBID00000000000000000000  [decision] stub";;
+  *) echo "unexpected: $*" >&2; exit 2;;
+esac
+`;
+  fs.writeFileSync(path.join(dir, 'ledger'), stub, { mode: 0o755 });
+}
+
+describe('context-save/restore: nudge capture', () => {
+  let tmpDir: string;
+  beforeEach(() => { tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-nudge-')); });
+  afterEach(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); });
+
+  const cleanPath = '/usr/bin:/bin';
+
+  test('generated skills carry the nudge section, the restore line, and no tail-truncated ledger search', () => {
+    const save = fs.readFileSync(path.join(ROOT, 'context-save', 'SKILL.md'), 'utf-8');
+    const restore = fs.readFileSync(path.join(ROOT, 'context-restore', 'SKILL.md'), 'utf-8');
+    expect(save).toContain('### Nudges');
+    expect(save).toContain('On restore, run `ledger search --tag nudge` first.');
+    expect(restore).toContain('### Nudges in force');
+    expect(restore).toContain('Step 1.5');
+    // WIP-commit recovery lives in restore now (its old copy sat inside a dead conflict block in save).
+    expect(restore).toContain('Step 1.6');
+    expect(restore).toContain("--grep='^WIP:'");
+    // ledger search is newest-first; piping it to tail keeps the OLDEST rows.
+    expect(save).not.toMatch(/ledger search[^\n]*\|\s*tail/);
+    expect(restore).not.toMatch(/ledger search[^\n]*\|\s*tail/);
+    // Conversation text must reach the ledger via a quoted heredoc, never argv quoting.
+    expect(save).toContain("<<'NUDGE'");
+  });
+
+  test('GSTACK_NO_LEDGER=1 → LEDGER_UNAVAILABLE, nothing else', () => {
+    const r = runBash(NUDGE_LOAD_BASH, { GSTACK_NO_LEDGER: '1', PATH: cleanPath });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toBe('LEDGER_UNAVAILABLE');
+  });
+
+  test('non-Anthropic ANTHROPIC_BASE_URL → LEDGER_SUPPRESSED (privacy guard)', () => {
+    writeStubLedger(tmpDir);
+    const r = runBash(NUDGE_LOAD_BASH, { ANTHROPIC_BASE_URL: 'https://api.moonshot.ai/anthropic', PATH: `${tmpDir}:${cleanPath}` });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('LEDGER_SUPPRESSED');
+    expect(r.stdout).not.toContain('LEDGER_SEARCH_DONE');
+  });
+
+  test('Anthropic ANTHROPIC_BASE_URL does not trip the guard', () => {
+    writeStubLedger(tmpDir);
+    const r = runBash(NUDGE_LOAD_BASH, { ANTHROPIC_BASE_URL: 'https://api.anthropic.com', PATH: `${tmpDir}:${cleanPath}` });
+    expect(r.stdout).toContain('LEDGER_SEARCH_DONE');
+  });
+
+  test('no ledger on PATH → LEDGER_UNAVAILABLE', () => {
+    const r = runBash(NUDGE_LOAD_BASH, { PATH: cleanPath });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toBe('LEDGER_UNAVAILABLE');
+  });
+
+  test('a different program named ledger (no merge-incoming verb) → LEDGER_UNAVAILABLE', () => {
+    fs.writeFileSync(path.join(tmpDir, 'ledger'), '#!/bin/bash\necho "Ledger 3.3.2, the command-line accounting tool"\n', { mode: 0o755 });
+    const r = runBash(NUDGE_LOAD_BASH, { PATH: `${tmpDir}:${cleanPath}` });
+    expect(r.stdout.trim()).toBe('LEDGER_UNAVAILABLE');
+  });
+
+  test('real-shaped ledger → both scoped searches run, newest-first cap is head not tail', () => {
+    writeStubLedger(tmpDir);
+    const r = runBash(NUDGE_LOAD_BASH, { PATH: `${tmpDir}:${cleanPath}`, SLUG: 'some-repo' });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('NUDGES IN FORCE EVERYWHERE');
+    expect(r.stdout).toContain('NUDGES FOR THIS PROJECT (some-repo');
+    expect(r.stdout).toContain('LEDGER_SEARCH_DONE');
+    expect((r.stdout.match(/01STUBID/g) || []).length).toBe(2);
+  });
+
+  test('heredoc add delivers conversation text byte-exact and executes nothing', () => {
+    writeStubLedger(tmpDir);
+    const canary = path.join(tmpDir, 'pwned');
+    // Text a user could plausibly say, with every shell hazard at once.
+    const text = `don't ever run \`touch ${canary}\` or $(touch ${canary}); it's $HOME's "problem", not mine`;
+    const script = `ledger add --kind decision --tag nudge --tag "project:home" <<'NUDGE'\n${text}\nNUDGE\n`;
+    const r = runBash(script, { PATH: `${tmpDir}:${cleanPath}`, STUB_OUT: path.join(tmpDir, 'out'), HOME: tmpDir });
+    expect(r.exitCode).toBe(0);
+    expect(fs.existsSync(canary)).toBe(false);
+    expect(fs.readFileSync(path.join(tmpDir, 'out.stdin'), 'utf-8')).toBe(text + '\n');
+    expect(fs.readFileSync(path.join(tmpDir, 'out.args'), 'utf-8').split('\n')).toEqual(
+      ['add', '--kind', 'decision', '--tag', 'nudge', '--tag', 'project:home', '']
+    );
+  });
+});
