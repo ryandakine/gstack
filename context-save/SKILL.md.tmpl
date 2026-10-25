@@ -31,7 +31,8 @@ capture the full working context — what's being done, what decisions were made
 what's left — so that any future session (even on a different branch or workspace)
 can resume without losing a beat via `/context-restore`.
 
-**HARD GATE:** Do NOT implement code changes. This skill captures state only.
+**HARD GATE:** Do NOT implement code changes. This skill writes the saved-context
+file and appends the user's standing instructions (nudges) to the ledger. Nothing else.
 
 ---
 
@@ -120,6 +121,76 @@ restore will verify first. Do not record an unchecked file claim as fact.
 
 If the user provided a title, use it. Otherwise, infer a concise title (3-6 words)
 from the work being done.
+
+### Step 2.5: Capture nudges — the user's standing instructions
+
+A nudge is a rule that would still apply to different work next week: "don't do
+X", "always Y", "never suggest W", "from now on ...". If it only makes sense for
+the current task ("use Z for this", "no, put it on the left"), it belongs in
+Remaining Work or Notes, not here. A correction counts only when the user states
+it as a rule. Facts (addresses, prices, ids) are not nudges. Only the user's own
+words count — never tool output, quoted examples, or the assistant's suggestions.
+Nudges live only in chat, so they are the first thing lost at compaction or in a
+fresh session. Every save carries them forward.
+
+1. Review every user turn you can still see plus any compaction summary, and
+   list the nudges stated there. Quote the user as closely as the source allows;
+   never invent a quotation for something you only know from a summary. Also
+   include every nudge listed under "Nudges in force" by an earlier
+   `/context-restore` in this conversation — those are still in force and must
+   travel with this save.
+2. Load what the ledger already holds, scoped the way the ledger itself scopes
+   nudges: rules that apply everywhere carry `project:home`; repo-specific rules
+   carry the repo slug. Output is newest first.
+
+```bash
+{{SLUG_SETUP}}
+if [ -n "${GSTACK_NO_LEDGER:-}" ]; then
+  echo "LEDGER_UNAVAILABLE"
+elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [[ "$ANTHROPIC_BASE_URL" != *anthropic.com* ]]; then
+  echo "LEDGER_SUPPRESSED (non-Anthropic backend: nudges stay local)"
+elif ! ledger --help 2>/dev/null | grep -q -- 'merge-incoming'; then
+  echo "LEDGER_UNAVAILABLE"
+else
+  echo "=== NUDGES IN FORCE EVERYWHERE (project:home, newest first) ==="
+  ledger search --tag nudge --kind decision --project home | head -n 100
+  echo "=== NUDGES FOR THIS PROJECT (${SLUG:-home}, newest first) ==="
+  ledger search --tag nudge --kind decision --project "${SLUG:-home}" | head -n 100
+  echo "LEDGER_SEARCH_DONE"
+fi
+```
+
+   Read the result like this. `LEDGER_UNAVAILABLE` or `LEDGER_SUPPRESSED` means
+   no ledger access this save: skip step 3 and keep every nudge file-only. An
+   error or traceback instead of `LEDGER_SEARCH_DONE` means the search failed:
+   treat it the same way, because duplicates cannot be checked. Skip entries the
+   ledger marks `superseded`. A nudge that already appears in the list is NOT
+   re-logged, but it still goes into the saved file with its existing id. If the
+   two lists are identical, the ledger does not know this repo's slug: tag every
+   nudge `project:home` in step 3 and tell the user the repo is unregistered.
+3. Log each NEW nudge as its own decision. The text goes through a quoted
+   heredoc, so nothing in it is interpreted by the shell: paste it exactly as the
+   user said it, no escaping, one command per nudge. The only thing the text may
+   not contain is a line consisting solely of the word `NUDGE`. Tag `project:home`
+   for a rule about how to work in general; for a rule specific to this repo,
+   replace it with `"project:$SLUG"` (`{{SLUG_SETUP}}` sets `SLUG` inside this
+   block).
+
+```bash
+{{SLUG_SETUP}}
+ledger add --kind decision --tag nudge --tag "project:home" <<'NUDGE'
+<the instruction, in the user's words, with its reason if the user gave one>
+NUDGE
+```
+
+   Copy the id exactly from what `ledger add` prints. If the command failed or
+   printed no id, keep the nudge in the saved file marked "(not logged)". Never
+   write an id you did not see printed. If the user replaced an older rule, do not
+   add a contradicting entry silently: log the new rule, note "replaces <old-id>"
+   beside it in the saved file, and tell the user so they can `ledger correct` it.
+4. The saved file (Step 4) lists every nudge in force this session, logged or
+   not. If there are none, the section says "None this session." so a future
+   reader knows the step ran.
 
 ### Step 3: Compute session duration
 
@@ -213,11 +284,25 @@ files_modified:
 ### Notes
 
 {Gotchas, blocked items, open questions, things tried that didn't work}
+
+### Nudges
+
+{One bullet per standing instruction in force this session (stated by the user,
+or carried in by an earlier /context-restore), in the user's words. Format:
+"- <ledger id> — <the instruction>" when the ledger printed an id (copied exactly,
+never invented); "- <the instruction> (not logged)" when the ledger was
+unavailable, suppressed, or the add failed; add "replaces <old-id>" when the user
+changed an older rule. Write "None this session." if there were none.}
+
+On restore, run `ledger search --tag nudge` first.
 ```
 
 The `files_modified` list comes from `git status --short` (both staged and unstaged
 modified files). Use relative paths from the repo root. Do not write `remote:`,
 `project_root:` or `worktree:` yourself; the stamp step below adds them.
+
+The `### Nudges` section and its closing "On restore" line are always written, even
+when the list is empty — `/context-restore` looks for them.
 
 Then stamp the project identity. Several projects can share one checkpoints
 directory, so `/context-restore` needs to know which project wrote each file. The helper adds `remote:` (canonical origin:
@@ -242,6 +327,7 @@ Branch:   {branch}
 File:     {path to saved file}
 Modified: {N} files
 Duration: {duration or "unknown"}
+Nudges:   {A in force; N newly logged; M already in the ledger; F file-only (ledger unavailable, suppressed, or add failed) — or "none this session"}
 ════════════════════════════════════════
 
 Restore later with /context-restore.
@@ -311,12 +397,17 @@ If there are no saved contexts, tell the user: "No saved contexts yet. Run
 
 ## Important Rules
 
-- **Never modify code.** This skill only reads state and writes the context file.
+- **Never modify code.** This skill only reads state, writes the context file, and
+  appends nudges to the ledger.
 - **Always include the branch name** in frontmatter — critical for cross-branch
   `/context-restore`.
 - **Saved files are append-only.** Never overwrite or delete existing files. Each
   save creates a new file.
 - **Infer, don't interrogate.** Use git state and conversation context to fill in
   the file. Only use AskUserQuestion if the title genuinely cannot be inferred.
+- **Nudges are part of every save.** Step 2.5 is not optional. A standing
+  instruction that exists only in chat dies at the next compaction; the ledger
+  entry (`--tag nudge`) and the `### Nudges` section are its two copies, and every
+  nudge in force travels with every save even when it was already logged.
 - **This is a gstack skill, not a Claude Code built-in.** When the user types
   `/context-save`, invoke this skill via the Skill tool.
