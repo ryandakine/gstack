@@ -363,7 +363,7 @@ pick up exactly where they left off. Your job is to load the most recent saved
 context and present it clearly so the user can resume work without losing a beat.
 
 **HARD GATE:** Do NOT implement code changes. This skill only reads saved
-context files and presents the summary.
+context files and the ledger's recorded nudges, and presents the summary.
 
 **Default: prefer the most recent checkpoint saved on the CURRENT branch; if
 this branch has none, fall back to the most recent across ALL branches.** The
@@ -501,6 +501,76 @@ has written to). Prefixed lines are never candidates for "latest":
   this directory (`POINTER`: a /context-save started here recorded it). These are
   candidates, not mismatches.
 
+### Step 1.5: Reload the user's standing instructions (nudges)
+
+`/context-save` logs the user's standing instructions ("don't do X", "always Y")
+to the ledger under `--tag nudge` and lists them in the saved file. Pull them now,
+before any work resumes, so the restored session obeys them from its first action.
+The ledger scopes nudges the same way its own session-start recall does: rules
+tagged `project:home` apply everywhere; rules tagged with a repo slug apply only
+there. Output is newest first.
+
+```bash
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null) && mkdir -p "$GSTACK_STATE_ROOT/projects/$SLUG" && echo "PROJECT_DIR: $GSTACK_STATE_ROOT/projects/$SLUG"
+if [ -n "${GSTACK_NO_LEDGER:-}" ]; then
+  echo "LEDGER_UNAVAILABLE"
+elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [[ "$ANTHROPIC_BASE_URL" != *anthropic.com* ]]; then
+  echo "LEDGER_SUPPRESSED (non-Anthropic backend: nudges stay local)"
+elif ! ledger --help 2>/dev/null | grep -q -- 'merge-incoming'; then
+  echo "LEDGER_UNAVAILABLE"
+else
+  echo "=== NUDGES IN FORCE EVERYWHERE (project:home, newest first) ==="
+  ledger search --tag nudge --kind decision --project home | head -n 100
+  echo "=== NUDGES FOR THIS PROJECT (${SLUG:-home}, newest first) ==="
+  ledger search --tag nudge --kind decision --project "${SLUG:-home}" | head -n 100
+  echo "LEDGER_SEARCH_DONE"
+fi
+```
+
+Reading the result: skip entries the ledger marks `superseded`. A nudge recorded
+for another project is not in force here. `LEDGER_UNAVAILABLE` or
+`LEDGER_SUPPRESSED` (or an error instead of `LEDGER_SEARCH_DONE`) means the ledger
+could not be consulted: say so in the summary rather than "None recorded", and rely
+on the saved file alone.
+
+In Step 2, also read the `### Nudges` section of the saved file. Merge the two
+sources, deduplicating by ledger id (a logged nudge appears in both): the ledger is
+the durable, cross-session copy; the saved file is the per-session copy and may
+hold nudges the ledger never received (for example when the save ran on a machine
+without `ledger`). Every nudge that survives that merge is an instruction in force
+for the rest of the session — with one override: what the user says in this
+session beats any saved nudge, and a rule the user has since revoked or replaced
+is never reactivated from an older saved file.
+
+### Step 1.6: Check for WIP commit context (continuous checkpoint mode)
+
+If `CHECKPOINT_MODE` was `"continuous"` during prior work, the branch may carry
+`WIP:` commits whose bodies hold `[gstack-context]` blocks (Decisions / Remaining /
+Tried / Skill). They are a second recovery trail beside the saved files. Only the
+current branch's recent history is read; no base branch is assumed.
+
+```bash
+WIP_N=$(git log HEAD --grep='^WIP:' --since='30 days ago' --format='%H' -n 20 2>/dev/null | wc -l | tr -d ' ')
+if [ "${WIP_N:-0}" -gt 0 ]; then
+  echo "WIP_COMMITS_FOUND"
+  git log HEAD --grep='^WIP:' --since='30 days ago' --format='%H' -n 20 2>/dev/null | while IFS= read -r SHA; do
+    [ -n "$SHA" ] || continue
+    echo "--- commit $SHA ---"
+    git log -1 "$SHA" --format='%s%n%n%b' 2>/dev/null | \
+      awk '/\[gstack-context\]/,/\[\/gstack-context\]/ { print }'
+  done
+else
+  echo "NO_WIP_COMMITS"
+fi
+```
+
+If `WIP_COMMITS_FOUND`: read the extracted blocks and merge them with the saved
+file in Step 2. The git history shows the chronological arc; the saved file shows
+the intentional save points. Both matter. Do NOT delete WIP commits during
+restore; they remain the recovery trail until `/ship` squashes them into clean
+commits during PR creation.
+
 ### Step 2: Load the right file
 
 - If the user specified a title fragment or number: find the matching file among
@@ -582,6 +652,13 @@ Verify first (inspect read-only before executing anything)
 
 ### Notes
 {notes}
+
+### Nudges in force
+{standing instructions: the saved file's `### Nudges` section merged with the
+ledger output from Step 1.5, one line each, superseded and other-project entries
+left out. "None recorded" only when both sources were readable and empty; when the
+ledger was unavailable or suppressed, say "ledger not consulted — saved-file nudges
+only" above the list}
 ```
 
 If the current branch differs from the saved context's branch, note this:
@@ -613,6 +690,9 @@ state, then `/context-restore` will find it."
 If it also printed `LEGACY_BUCKET`, relay that line: earlier checkpoints are kept
 in the old bucket until the user copies them with `gstack-slug --adopt-legacy`.
 
+Still run Step 1.5 and show the ledger's nudges in force: the user's standing
+instructions apply even when there is no saved file to restore.
+
 ---
 
 ## Important Rules
@@ -628,5 +708,8 @@ in the old bucket until the user copies them with `gstack-slug --adopt-legacy`.
 - **"Most recent" means the filename `YYYYMMDD-HHMMSS` prefix**, not
   `ls -1t` (filesystem mtime). Filenames are stable across file-system
   operations; mtime is not.
+- **Nudges load before work resumes.** Step 1.5 always runs. The user's standing
+  instructions are not optional context; they are rules for the rest of the session,
+  except where the user's current instructions override them.
 - **This is a gstack skill, not a Claude Code built-in.** When the user types
   `/context-restore`, invoke this skill via the Skill tool.
